@@ -1,2 +1,360 @@
-# InnovaX
-InnovaX is an AI-powered platform that automatically creates, edits and publishes short-form videos for social media. 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InnovaX - AI Automation Platform</title>
+
+<style>
+
+*{
+margin:0;
+padding:0;
+box-sizing:border-box;
+font-family:Arial,Helvetica,sans-serif;
+}
+
+body{
+background:#0d1117;
+color:white;
+line-height:1.6;
+}
+
+header{
+background:linear-gradient(135deg,#2563eb,#1e40af);
+padding:80px 20px;
+text-align:center;
+}
+
+header h1{
+font-size:55px;
+margin-bottom:20px;
+}
+
+header p{
+font-size:20px;
+max-width:900px;
+margin:auto;
+opacity:.95;
+}
+
+.btn{
+display:inline-block;
+margin-top:35px;
+padding:15px 35px;
+background:white;
+color:#1e40af;
+text-decoration:none;
+font-weight:bold;
+border-radius:10px;
+transition:.3s;
+}
+
+.btn:hover{
+transform:translateY(-3px);
+}
+
+section{
+padding:70px 10%;
+}
+
+h2{
+font-size:38px;
+margin-bottom:25px;
+text-align:center;
+}
+
+.cards{
+
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+gap:25px;
+margin-top:40px;
+
+}
+
+.card{
+
+background:#161b22;
+padding:30px;
+border-radius:15px;
+transition:.3s;
+
+}
+
+.card:hover{
+transform:translateY(-8px);
+}
+
+.card h3{
+margin-bottom:15px;
+color:#58a6ff;
+}
+
+.steps{
+
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+gap:25px;
+margin-top:40px;
+
+}
+
+.step{
+
+background:#161b22;
+padding:30px;
+border-left:5px solid #2563eb;
+border-radius:10px;
+
+}
+
+.tech{
+
+display:flex;
+flex-wrap:wrap;
+justify-content:center;
+gap:15px;
+margin-top:40px;
+
+}
+
+.tech span{
+
+padding:12px 22px;
+background:#2563eb;
+border-radius:25px;
+
+}
+
+footer{
+
+background:#161b22;
+padding:40px;
+text-align:center;
+
+}
+
+footer a{
+
+color:#58a6ff;
+text-decoration:none;
+margin:0 10px;
+
+}
+
+footer a:hover{
+text-decoration:underline;
+}
+
+.contact{
+
+background:#111827;
+border-radius:15px;
+padding:35px;
+margin-top:40px;
+text-align:center;
+
+}
+
+.contact p{
+margin:10px;
+}
+
+@media(max-width:768px){
+
+header h1{
+font-size:38px;
+}
+
+header p{
+font-size:18px;
+}
+
+section{
+padding:60px 25px;
+}
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<header>
+
+<h1>InnovaX</h1>
+
+<p>
+
+AI-powered automation platform designed to generate, edit and publish
+high-quality social media content automatically using modern artificial
+intelligence workflows.
+
+</p>
+
+<a class="btn" href="#about">Learn More</a>
+
+</header>
+
+<section id="about">
+
+<h2>About InnovaX</h2>
+
+<p style="text-align:center;max-width:900px;margin:auto;">
+
+InnovaX is an automation platform that combines Artificial Intelligence,
+workflow automation and cloud services to streamline digital content creation.
+The platform focuses on generating professional short-form videos while
+reducing manual work through intelligent automation.
+
+</p>
+
+</section>
+
+<section>
+
+<h2>Main Features</h2>
+
+<div class="cards">
+
+<div class="card">
+<h3>AI Content Generation</h3>
+<p>Create scripts, ideas and captions automatically using modern AI models.</p>
+</div>
+
+<div class="card">
+<h3>Workflow Automation</h3>
+<p>Automate repetitive tasks using n8n and cloud-based integrations.</p>
+</div>
+
+<div class="card">
+<h3>Video Production</h3>
+<p>Generate professional videos using AI, stock media and automated editing pipelines.</p>
+</div>
+
+<div class="card">
+<h3>Social Publishing</h3>
+<p>Publish content across multiple platforms from one automated workflow.</p>
+</div>
+
+</div>
+
+</section>
+
+<section>
+
+<h2>How It Works</h2>
+
+<div class="steps">
+
+<div class="step">
+
+<h3>1. Generate Ideas</h3>
+
+<p>
+
+Artificial Intelligence researches trends and creates engaging content ideas.
+
+</p>
+
+</div>
+
+<div class="step">
+
+<h3>2. Create Content</h3>
+
+<p>
+
+Scripts, voiceovers, media assets and metadata are generated automatically.
+
+</p>
+
+</div>
+
+<div class="step">
+
+<h3>3. Produce Videos</h3>
+
+<p>
+
+The workflow assembles professional short videos using automated rendering.
+
+</p>
+
+</div>
+
+<div class="step">
+
+<h3>4. Publish</h3>
+
+<p>
+
+Finished videos are published automatically to supported social media platforms.
+
+</p>
+
+</div>
+
+</div>
+
+</section>
+
+<section>
+
+<h2>Technology Stack</h2>
+
+<div class="tech">
+
+<span>OpenAI</span>
+<span>Google Gemini</span>
+<span>n8n</span>
+<span>GitHub</span>
+<span>Cloud APIs</span>
+<span>YouTube API</span>
+<span>TikTok API</span>
+<span>Instagram API</span>
+
+</div>
+
+</section>
+
+<section>
+
+<h2>Contact</h2>
+
+<div class="contact">
+
+<p><strong>Email</strong></p>
+
+<p>adrianguerradaiz7@gmail.com</p>
+
+<p>
+
+For support, partnership opportunities or API-related questions,
+please contact us using the email above.
+
+</p>
+
+</div>
+
+</section>
+
+<footer>
+
+<p>© 2026 InnovaX. All rights reserved.</p>
+
+<br>
+
+<a href="privacy.html">Privacy Policy</a>
+
+|
+
+<a href="terms.html">Terms of Service</a>
+
+</footer>
+
+</body>
+</html>
