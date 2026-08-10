@@ -55,7 +55,7 @@ def run_job(job_id, scenes):
             concat=jobdir/'concat.txt'
             concat.write_text(''.join(f"file '{p.as_posix()}'\n" for p in inputs))
             final=jobdir/'final.mp4'
-            subprocess.run(['ffmpeg','-y','threads','1','-f','concat','-safe','0','-i',str(concat),'-c','copy','-movflags','+faststart',str(final)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            subprocess.run(['ffmpeg','-y','-threads','1','-f','concat','-safe','0','-i',str(concat),'-c','copy','-movflags','+faststart',str(final)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             JOBS[job_id].update(status='succeeded', url=f'/files/{job_id}/final.mp4')
             for p in inputs: p.unlink(missing_ok=True)
             concat.unlink(missing_ok=True)
