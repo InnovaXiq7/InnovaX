@@ -10,7 +10,13 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 import edge_tts
 
+
 app = Flask(__name__)
+
+
+# ============================================================
+# DIRECTORIOS
+# ============================================================
 
 BASE = Path("/tmp/innovax")
 BASE.mkdir(parents=True, exist_ok=True)
@@ -18,9 +24,19 @@ BASE.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR = BASE / "audio"
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ============================================================
+# JOBS
+# ============================================================
+
 JOBS = {}
 
 RENDER_LOCK = threading.Lock()
+
+
+# ============================================================
+# URL PUBLICA
+# ============================================================
 
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL",
@@ -29,67 +45,129 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 def public_url(path):
+
     base = PUBLIC_BASE_URL
 
     if not base:
-        hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+        hostname = os.environ.get(
+            "RENDER_EXTERNAL_HOSTNAME"
+        )
 
         if hostname:
+
             base = f"https://{hostname}"
+
         else:
+
             base = request.host_url.rstrip("/")
 
     return f"{base}{path}"
 
 
+# ============================================================
+# LIMPIAR JOB
+# ============================================================
+
 def clean_job(job_id):
+
     job_dir = BASE / job_id
 
     if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
 
-
-def download_audio(url, output_file):
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-threads",
-            "1",
-            "-i",
-            url,
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            str(output_file)
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Error descargando audio:\n{result.stderr[-3000:]}"
+        shutil.rmtree(
+            job_dir,
+            ignore_errors=True
         )
 
 
-async def generate_tts_async(text, voice, output_file):
+# ============================================================
+# DESCARGAR AUDIO
+# ============================================================
+
+def download_audio(
+    url,
+    output_file
+):
+
+    result = subprocess.run(
+
+        [
+            "ffmpeg",
+
+            "-y",
+
+            "-threads",
+            "1",
+
+            "-i",
+            url,
+
+            "-vn",
+
+            "-c:a",
+            "aac",
+
+            "-b:a",
+            "128k",
+
+            str(output_file)
+        ],
+
+        stdout=subprocess.DEVNULL,
+
+        stderr=subprocess.PIPE,
+
+        text=True
+    )
+
+
+    if result.returncode != 0:
+
+        raise RuntimeError(
+
+            "Error descargando audio:\n"
+            + result.stderr[-3000:]
+        )
+
+
+# ============================================================
+# EDGE TTS
+# ============================================================
+
+async def generate_tts_async(
+    text,
+    voice,
+    output_file
+):
+
     communicate = edge_tts.Communicate(
+
         text=text,
+
         voice=voice,
+
         rate="+0%",
+
         volume="+0%",
+
         pitch="+0Hz"
     )
 
-    await communicate.save(str(output_file))
+
+    await communicate.save(
+        str(output_file)
+    )
 
 
-def generate_tts(text, voice, output_file):
+def generate_tts(
+    text,
+    voice,
+    output_file
+):
+
     asyncio.run(
+
         generate_tts_async(
             text,
             voice,
@@ -98,29 +176,76 @@ def generate_tts(text, voice, output_file):
     )
 
 
-def prepare_subtitle(text):
-    """
-    Divide el subtítulo en líneas para que no ocupe
-    todo el ancho de la pantalla.
-    """
+# ============================================================
+# PREPARAR SUBTITULOS
+# ============================================================
 
-    text = str(text or "").strip()
+def prepare_subtitle(text):
+
+    text = str(
+        text or ""
+    ).strip()
+
 
     if not text:
+
         return ""
 
-    # Aproximadamente 28 caracteres por línea
+
+    # Normalizar espacios
+
+    text = " ".join(
+        text.split()
+    )
+
+
+    # Crear líneas relativamente cortas
+
     lines = textwrap.wrap(
+
         text,
-        width=28,
+
+        width=32,
+
         break_long_words=False,
+
         break_on_hyphens=False
     )
+
+
+    # Máximo 2 líneas
+
+    if len(lines) > 2:
+
+        words = text.split()
+
+        total = len(words)
+
+        midpoint = (total + 1) // 2
+
+        lines = [
+
+            " ".join(
+                words[:midpoint]
+            ),
+
+            " ".join(
+                words[midpoint:]
+            )
+        ]
+
 
     return "\n".join(lines)
 
 
-def run_job(job_id, scenes):
+# ============================================================
+# RENDER DE UN JOB
+# ============================================================
+
+def run_job(
+    job_id,
+    scenes
+):
 
     with RENDER_LOCK:
 
@@ -131,153 +256,263 @@ def run_job(job_id, scenes):
             exist_ok=True
         )
 
+
         JOBS[job_id]["status"] = "rendering"
+
 
         try:
 
             inputs = []
 
+
+            # ====================================================
+            # PROCESAR CADA ESCENA
+            # ====================================================
+
             for i, scene in enumerate(scenes):
 
-                # -----------------------------------------
+
+                # ------------------------------------------------
                 # VIDEO
-                # -----------------------------------------
+                # ------------------------------------------------
 
                 src = (
+
                     scene.get("video_url")
-                    or scene.get("src")
-                    or scene.get("video_src")
+
+                    or
+
+                    scene.get("src")
+
+                    or
+
+                    scene.get("video_src")
                 )
+
 
                 if not src:
+
                     raise ValueError(
-                        f"Scene {i + 1} has no video source"
+
+                        f"Scene {i + 1} "
+                        "has no video source"
                     )
 
-                # -----------------------------------------
+
+                # ------------------------------------------------
                 # AUDIO
-                # -----------------------------------------
+                # ------------------------------------------------
 
                 audio_url = (
+
                     scene.get("audio_url")
-                    or scene.get("audio_src")
+
+                    or
+
+                    scene.get("audio_src")
                 )
 
-                # -----------------------------------------
-                # SUBTITLE
-                # -----------------------------------------
+
+                # ------------------------------------------------
+                # SUBTITULO
+                # ------------------------------------------------
 
                 subtitle = (
+
                     scene.get("subtitle")
-                    or scene.get("text")
-                    or scene.get("voiceover")
-                    or ""
+
+                    or
+
+                    scene.get("voiceover")
+
+                    or
+
+                    scene.get("text")
+
+                    or
+
+                    ""
                 )
 
-                subtitle = prepare_subtitle(subtitle)
 
-                # -----------------------------------------
-                # DURATION
-                # -----------------------------------------
+                subtitle = prepare_subtitle(
+                    subtitle
+                )
+
+
+                # ------------------------------------------------
+                # DURACION
+                # ------------------------------------------------
 
                 duration = scene.get(
                     "duration",
                     7
                 )
 
+
                 try:
-                    duration = float(duration)
+
+                    duration = float(
+                        duration
+                    )
+
                 except Exception:
+
                     duration = 7
 
+
                 if duration < 1:
+
                     duration = 1
 
-                # -----------------------------------------
-                # OUTPUT FILES
-                # -----------------------------------------
+
+                # ------------------------------------------------
+                # ARCHIVOS
+                # ------------------------------------------------
 
                 video_out = (
-                    job_dir /
+
+                    job_dir
+                    /
                     f"scene_{i}.mp4"
                 )
 
+
                 audio_out = None
 
+
                 subtitle_file = (
-                    job_dir /
+
+                    job_dir
+                    /
                     f"subtitle_{i}.txt"
                 )
 
-                # -----------------------------------------
-                # SAVE SUBTITLE TEXT
-                # -----------------------------------------
+
+                # ------------------------------------------------
+                # GUARDAR SUBTITULO
+                # ------------------------------------------------
 
                 subtitle_file.write_text(
+
                     subtitle,
+
                     encoding="utf-8"
                 )
 
-                # -----------------------------------------
-                # DOWNLOAD AUDIO
-                # -----------------------------------------
+
+                # ------------------------------------------------
+                # DESCARGAR AUDIO
+                # ------------------------------------------------
 
                 if audio_url:
 
                     audio_out = (
-                        job_dir /
+
+                        job_dir
+                        /
                         f"audio_{i}.m4a"
                     )
 
+
                     download_audio(
+
                         audio_url,
+
                         audio_out
                     )
 
-                # -----------------------------------------
-                # VIDEO FILTER
-                # -----------------------------------------
+
+                # =================================================
+                # FILTRO VIDEO BASE
+                # =================================================
 
                 video_filter = (
+
                     "scale=720:1280:"
                     "force_original_aspect_ratio=increase,"
                     "crop=720:1280,"
                     "fps=24"
                 )
 
-                # -----------------------------------------
-                # SUBTITLE FILTER
-                # -----------------------------------------
+
+                # =================================================
+                # SUBTITULOS
+                # =================================================
 
                 if subtitle:
 
-                    subtitle_filter = (
-                        ",drawtext="
-                        "fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-                        f"textfile='{subtitle_file.as_posix()}':"
-                        "fontcolor=white:"
-                        "fontsize=48:"
-                        "line_spacing=12:"
-                        "borderw=5:"
-                        "bordercolor=black:"
-                        "box=1:"
-                        "boxcolor=black@0.55:"
-                        "boxborderw=18:"
-                        "x=(w-text_w)/2:"
-                        "y=h-300"
+
+                    subtitle_path = (
+                        subtitle_file
+                        .as_posix()
+                        .replace(
+                            "\\",
+                            "/"
+                        )
                     )
 
-                    video_filter += subtitle_filter
 
-                # -----------------------------------------
-                # FFMPEG COMMAND WITH AUDIO
-                # -----------------------------------------
+                    # ------------------------------------------------
+                    # Caja de subtítulos
+                    #
+                    # Dejamos un ancho fijo dentro del vídeo.
+                    # Esto hace que el texto quede realmente centrado.
+                    # ------------------------------------------------
+
+                    subtitle_filter = (
+
+                        ",drawtext="
+
+                        "fontfile=/usr/share/fonts/truetype/dejavu/"
+                        "DejaVuSans-Bold.ttf:"
+
+                        f"textfile='{subtitle_path}':"
+
+                        "fontcolor=white:"
+
+                        "fontsize=48:"
+
+                        "line_spacing=6:"
+
+                        "borderw=4:"
+
+                        "bordercolor=black:"
+
+                        "box=1:"
+
+                        "boxcolor=black@0.60:"
+
+                        "boxborderw=18:"
+
+                        "boxw=620:"
+
+                        "text_align=center:"
+
+                        "x=50:"
+
+                        "y=h-360"
+                    )
+
+
+                    video_filter += (
+                        subtitle_filter
+                    )
+
+
+                # =================================================
+                # FFMPEG CON AUDIO
+                # =================================================
 
                 if audio_out:
 
+
                     command = [
+
                         "ffmpeg",
+
                         "-y",
+
                         "-threads",
                         "1",
 
@@ -322,15 +557,20 @@ def run_job(job_id, scenes):
                         str(video_out)
                     ]
 
-                # -----------------------------------------
-                # FFMPEG WITHOUT AUDIO
-                # -----------------------------------------
+
+                # =================================================
+                # FFMPEG SIN AUDIO
+                # =================================================
 
                 else:
 
+
                     command = [
+
                         "ffmpeg",
+
                         "-y",
+
                         "-threads",
                         "1",
 
@@ -360,35 +600,56 @@ def run_job(job_id, scenes):
                         str(video_out)
                     ]
 
-                # -----------------------------------------
-                # RENDER SCENE
-                # -----------------------------------------
+
+                # =================================================
+                # RENDER
+                # =================================================
 
                 result = subprocess.run(
+
                     command,
+
                     stdout=subprocess.DEVNULL,
+
                     stderr=subprocess.PIPE,
+
                     text=True
                 )
+
 
                 if result.returncode != 0:
 
                     raise RuntimeError(
-                        f"Error rendering scene {i + 1}:\n"
+
+                        f"Error rendering scene "
+                        f"{i + 1}:\n"
                         f"{result.stderr[-4000:]}"
                     )
 
-                inputs.append(video_out)
 
-                # -----------------------------------------
-                # CLEAN TEMP FILES
-                # -----------------------------------------
+                inputs.append(
+                    video_out
+                )
 
-                if audio_out and audio_out.exists():
+
+                # ------------------------------------------------
+                # BORRAR AUDIO TEMPORAL
+                # ------------------------------------------------
+
+                if (
+                    audio_out
+                    and
+                    audio_out.exists()
+                ):
 
                     audio_out.unlink(
                         missing_ok=True
                     )
+
+
+                # ------------------------------------------------
+                # BORRAR TEXTO TEMPORAL
+                # ------------------------------------------------
 
                 if subtitle_file.exists():
 
@@ -396,32 +657,47 @@ def run_job(job_id, scenes):
                         missing_ok=True
                     )
 
-            # =============================================
-            # CONCATENATE ALL SCENES
-            # =============================================
+
+            # ====================================================
+            # CONCATENAR ESCENAS
+            # ====================================================
 
             concat_file = (
-                job_dir /
+
+                job_dir
+                /
                 "concat.txt"
             )
 
+
             concat_lines = []
+
 
             for video_file in inputs:
 
                 concat_lines.append(
+
                     f"file '{video_file.as_posix()}'\n"
                 )
 
+
             concat_file.write_text(
-                "".join(concat_lines),
+
+                "".join(
+                    concat_lines
+                ),
+
                 encoding="utf-8"
             )
 
+
             final_file = (
-                job_dir /
+
+                job_dir
+                /
                 "final.mp4"
             )
+
 
             concat_command = [
 
@@ -450,40 +726,56 @@ def run_job(job_id, scenes):
                 str(final_file)
             ]
 
+
             result = subprocess.run(
+
                 concat_command,
+
                 stdout=subprocess.DEVNULL,
+
                 stderr=subprocess.PIPE,
+
                 text=True
             )
+
 
             if result.returncode != 0:
 
                 raise RuntimeError(
+
                     "Error concatenating scenes:\n"
-                    f"{result.stderr[-4000:]}"
+                    +
+                    result.stderr[-4000:]
                 )
 
-            # =============================================
-            # SUCCESS
-            # =============================================
+
+            # ====================================================
+            # JOB COMPLETADO
+            # ====================================================
 
             JOBS[job_id].update(
 
                 status="succeeded",
 
                 url=public_url(
-                    f"/files/{job_id}/final.mp4"
+
+                    f"/files/"
+                    f"{job_id}/"
+                    f"final.mp4"
                 ),
 
                 local_url=(
-                    f"/files/{job_id}/final.mp4"
+
+                    f"/files/"
+                    f"{job_id}/"
+                    f"final.mp4"
                 )
             )
 
-            # =============================================
-            # CLEAN
-            # =============================================
+
+            # ====================================================
+            # LIMPIEZA
+            # ====================================================
 
             for video_file in inputs:
 
@@ -491,11 +783,14 @@ def run_job(job_id, scenes):
                     missing_ok=True
                 )
 
+
             concat_file.unlink(
                 missing_ok=True
             )
 
+
         except Exception as e:
+
 
             JOBS[job_id].update(
 
@@ -504,44 +799,57 @@ def run_job(job_id, scenes):
                 error=str(e)
             )
 
-            clean_job(job_id)
+
+            clean_job(
+                job_id
+            )
 
 
-# ========================================================
+# ============================================================
 # HEALTH
-# ========================================================
+# ============================================================
 
 @app.get("/health")
 def health():
 
     return jsonify(
+
         ok=True,
+
         service="n8n-free-ffmpeg-renderer",
+
         version=6,
+
         tts="edge-tts",
+
         subtitles=True
     )
 
 
-# ========================================================
+# ============================================================
 # ROOT
-# ========================================================
+# ============================================================
 
 @app.get("/")
 def root():
 
     return jsonify(
+
         ok=True,
+
         service="n8n-free-ffmpeg-renderer",
+
         version=6,
+
         tts="edge-tts",
+
         subtitles=True
     )
 
 
-# ========================================================
+# ============================================================
 # TTS
-# ========================================================
+# ============================================================
 
 @app.post("/tts")
 def tts():
@@ -552,54 +860,79 @@ def tts():
             silent=True
         ) or {}
 
+
         text = str(
+
             data.get(
                 "text",
                 ""
             )
         ).strip()
 
+
         voice = str(
+
             data.get(
                 "voice",
                 "es-ES-AlvaroNeural"
             )
         ).strip()
 
+
         if not text:
 
             return jsonify(
+
                 error="No text supplied."
+
             ), 400
+
 
         if not voice:
 
             voice = "es-ES-AlvaroNeural"
 
+
         audio_id = uuid.uuid4().hex
 
-        filename = f"{audio_id}.mp3"
+        filename = (
+            f"{audio_id}.mp3"
+        )
+
 
         output_file = (
-            AUDIO_DIR /
+
+            AUDIO_DIR
+            /
             filename
         )
 
+
         generate_tts(
+
             text,
+
             voice,
+
             output_file
         )
+
 
         if not output_file.exists():
 
             raise RuntimeError(
-                "TTS did not create an audio file."
+
+                "TTS did not create "
+                "an audio file."
             )
 
+
         path = (
-            f"/files/audio/{filename}"
+
+            f"/files/audio/"
+            f"{filename}"
         )
+
 
         return jsonify(
 
@@ -609,19 +942,24 @@ def tts():
 
             url=path,
 
-            public_url=public_url(path)
+            public_url=public_url(
+                path
+            )
         )
+
 
     except Exception as e:
 
         return jsonify(
+
             error=str(e)
+
         ), 500
 
 
-# ========================================================
+# ============================================================
 # UPLOAD AUDIO
-# ========================================================
+# ============================================================
 
 @app.post("/upload-audio")
 def upload_audio():
@@ -629,36 +967,58 @@ def upload_audio():
     try:
 
         audio = (
-            request.files.get("file")
+
+            request.files.get(
+                "file"
+            )
+
             or
-            request.files.get("data")
+
+            request.files.get(
+                "data"
+            )
         )
+
 
         if not audio:
 
             return jsonify(
+
                 error=(
                     "No audio file supplied. "
-                    "Use multipart field 'file' or 'data'."
+                    "Use multipart field "
+                    "'file' or 'data'."
                 )
+
             ), 400
+
 
         audio_id = uuid.uuid4().hex
 
-        filename = f"{audio_id}.mp3"
+        filename = (
+            f"{audio_id}.mp3"
+        )
+
 
         output_file = (
-            AUDIO_DIR /
+
+            AUDIO_DIR
+            /
             filename
         )
+
 
         audio.save(
             output_file
         )
 
+
         path = (
-            f"/files/audio/{filename}"
+
+            f"/files/audio/"
+            f"{filename}"
         )
+
 
         return jsonify(
 
@@ -666,19 +1026,24 @@ def upload_audio():
 
             url=path,
 
-            public_url=public_url(path)
+            public_url=public_url(
+                path
+            )
         )
+
 
     except Exception as e:
 
         return jsonify(
+
             error=str(e)
+
         ), 500
 
 
-# ========================================================
+# ============================================================
 # RENDER
-# ========================================================
+# ============================================================
 
 @app.post("/render")
 def render():
@@ -687,9 +1052,11 @@ def render():
         silent=True
     ) or {}
 
+
     scenes = data.get(
         "scenes"
     )
+
 
     if not isinstance(
         scenes,
@@ -698,7 +1065,10 @@ def render():
 
         return jsonify(
 
-            error="El campo scenes debe ser una lista.",
+            error=(
+                "El campo scenes "
+                "debe ser una lista."
+            ),
 
             id=None,
 
@@ -707,12 +1077,16 @@ def render():
             url=None
 
         ), 400
+
 
     if len(scenes) < 1:
 
         return jsonify(
 
-            error="Se requiere al menos una escena.",
+            error=(
+                "Se requiere al menos "
+                "una escena."
+            ),
 
             id=None,
 
@@ -722,7 +1096,9 @@ def render():
 
         ), 400
 
+
     job_id = uuid.uuid4().hex
+
 
     JOBS[job_id] = {
 
@@ -735,44 +1111,90 @@ def render():
         "error": None
     }
 
+
     normalized = []
 
-    for index, scene in enumerate(scenes):
+
+    for index, scene in enumerate(
+        scenes
+    ):
+
 
         if not isinstance(
             scene,
             dict
         ):
+
             continue
 
+
         src = (
-            scene.get("video_url")
+
+            scene.get(
+                "video_url"
+            )
+
             or
-            scene.get("src")
+
+            scene.get(
+                "src"
+            )
+
             or
-            scene.get("video_src")
+
+            scene.get(
+                "video_src"
+            )
         )
+
 
         audio_url = (
-            scene.get("audio_url")
+
+            scene.get(
+                "audio_url"
+            )
+
             or
-            scene.get("audio_src")
+
+            scene.get(
+                "audio_src"
+            )
         )
 
+
+        # IMPORTANTE:
+        # Ahora conservamos el subtítulo
+        # que llega desde n8n.
+
         subtitle = (
-            scene.get("subtitle")
+
+            scene.get(
+                "subtitle"
+            )
+
             or
-            scene.get("text")
+
+            scene.get(
+                "voiceover"
+            )
+
             or
-            scene.get("voiceover")
+
+            scene.get(
+                "text"
+            )
+
             or
+
             ""
         )
+
 
         duration = scene.get(
             "duration",
             7
         )
+
 
         normalized.append({
 
@@ -788,6 +1210,7 @@ def render():
 
         })
 
+
     if not normalized:
 
         JOBS[job_id].update(
@@ -797,31 +1220,37 @@ def render():
             error="No valid scenes."
         )
 
+
         return jsonify(
             JOBS[job_id]
         ), 400
+
 
     threading.Thread(
 
         target=run_job,
 
         args=(
+
             job_id,
+
             normalized
+
         ),
 
         daemon=True
 
     ).start()
 
+
     return jsonify(
         JOBS[job_id]
     )
 
 
-# ========================================================
+# ============================================================
 # STATUS
-# ========================================================
+# ============================================================
 
 @app.get("/status/<job_id>")
 def status(job_id):
@@ -830,24 +1259,31 @@ def status(job_id):
         job_id
     )
 
+
     if not job:
 
         return jsonify(
 
-            error="No render was found with that ID."
+            error=(
+                "No render was found "
+                "with that ID."
+            )
 
         ), 404
+
 
     return jsonify(
         job
     )
 
 
-# ========================================================
+# ============================================================
 # VIDEO FILE
-# ========================================================
+# ============================================================
 
-@app.get("/files/<job_id>/<filename>")
+@app.get(
+    "/files/<job_id>/<filename>"
+)
 def render_file(
     job_id,
     filename
@@ -863,11 +1299,13 @@ def render_file(
     )
 
 
-# ========================================================
+# ============================================================
 # AUDIO FILE
-# ========================================================
+# ============================================================
 
-@app.get("/files/audio/<filename>")
+@app.get(
+    "/files/audio/<filename>"
+)
 def audio_file(filename):
 
     return send_from_directory(
@@ -880,18 +1318,20 @@ def audio_file(filename):
     )
 
 
-# ========================================================
+# ============================================================
 # START SERVER
-# ========================================================
+# ============================================================
 
 if __name__ == "__main__":
 
     port = int(
+
         os.environ.get(
             "PORT",
             10000
         )
     )
+
 
     app.run(
 
