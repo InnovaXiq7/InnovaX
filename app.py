@@ -4,12 +4,16 @@ import shutil
 import subprocess
 import threading
 import asyncio
-import textwrap
+import re
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
 import edge_tts
 
+
+# ============================================================
+# APP
+# ============================================================
 
 app = Flask(__name__)
 
@@ -35,7 +39,7 @@ RENDER_LOCK = threading.Lock()
 
 
 # ============================================================
-# URL PUBLICA
+# PUBLIC URL
 # ============================================================
 
 PUBLIC_BASE_URL = os.environ.get(
@@ -55,14 +59,103 @@ def public_url(path):
         )
 
         if hostname:
-
             base = f"https://{hostname}"
 
         else:
-
             base = request.host_url.rstrip("/")
 
     return f"{base}{path}"
+
+
+# ============================================================
+# UTILIDADES
+# ============================================================
+
+def safe_float(value, default=7.0):
+
+    try:
+
+        value = float(value)
+
+        if not value > 0:
+            return default
+
+        return value
+
+    except Exception:
+
+        return default
+
+
+def format_ass_time(seconds):
+
+    seconds = max(
+        0,
+        float(seconds)
+    )
+
+    hours = int(seconds // 3600)
+
+    minutes = int(
+        (seconds % 3600) // 60
+    )
+
+    secs = seconds % 60
+
+    whole = int(secs)
+
+    centiseconds = int(
+        round(
+            (secs - whole) * 100
+        )
+    )
+
+    if centiseconds >= 100:
+
+        whole += 1
+        centiseconds = 0
+
+    if whole >= 60:
+
+        minutes += whole // 60
+        whole %= 60
+
+    if minutes >= 60:
+
+        hours += minutes // 60
+        minutes %= 60
+
+    return (
+        f"{hours}:"
+        f"{minutes:02d}:"
+        f"{whole:02d}."
+        f"{centiseconds:02d}"
+    )
+
+
+def clean_text(text):
+
+    text = str(
+        text or ""
+    )
+
+    text = text.replace(
+        "\n",
+        " "
+    )
+
+    text = text.replace(
+        "\r",
+        " "
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
 
 
 # ============================================================
@@ -127,12 +220,13 @@ def download_audio(
         raise RuntimeError(
 
             "Error descargando audio:\n"
-            + result.stderr[-3000:]
+            +
+            result.stderr[-4000:]
         )
 
 
 # ============================================================
-# EDGE TTS
+# TTS
 # ============================================================
 
 async def generate_tts_async(
@@ -153,7 +247,6 @@ async def generate_tts_async(
 
         pitch="+0Hz"
     )
-
 
     await communicate.save(
         str(output_file)
@@ -177,69 +270,367 @@ def generate_tts(
 
 
 # ============================================================
-# PREPARAR SUBTITULOS
+# CREAR BLOQUES DE SUBTITULOS
 # ============================================================
 
-def prepare_subtitle(text):
+def make_caption_chunks(text):
 
-    text = str(
-        text or ""
-    ).strip()
-
+    text = clean_text(text)
 
     if not text:
+        return []
 
-        return ""
+    # --------------------------------------------------------
+    # Quitamos signos para decidir cómo dividir las palabras.
+    # Los signos se mantienen posteriormente si forman parte
+    # de la palabra original.
+    # --------------------------------------------------------
 
+    words = text.split()
 
-    # Normalizar espacios
-
-    text = " ".join(
-        text.split()
-    )
-
-
-    # Crear líneas relativamente cortas
-
-    lines = textwrap.wrap(
-
-        text,
-
-        width=32,
-
-        break_long_words=False,
-
-        break_on_hyphens=False
-    )
+    if not words:
+        return []
 
 
-    # Máximo 2 líneas
+    chunks = []
 
-    if len(lines) > 2:
+    current = []
 
-        words = text.split()
 
-        total = len(words)
+    for word in words:
 
-        midpoint = (total + 1) // 2
+        current.append(word)
 
-        lines = [
+        # ----------------------------------------------------
+        # Estilo tipo TikTok:
+        #
+        # 1 palabra
+        # o
+        # 2 palabras cortas
+        #
+        # Evitamos frases enormes.
+        # ----------------------------------------------------
 
-            " ".join(
-                words[:midpoint]
-            ),
+        current_text = " ".join(
+            current
+        )
 
-            " ".join(
-                words[midpoint:]
+        clean_current = re.sub(
+            r"[^\wáéíóúüñÁÉÍÓÚÜÑ]",
+            "",
+            current_text
+        )
+
+
+        if len(current) >= 2:
+
+            # Si ya tenemos dos palabras,
+            # normalmente cerramos el bloque.
+
+            if len(clean_current) >= 8:
+
+                chunks.append(
+                    " ".join(current)
+                )
+
+                current = []
+
+            else:
+
+                # Dos palabras muy cortas pueden quedarse juntas.
+
+                continue
+
+
+        elif len(current) == 1:
+
+            # Palabras largas aparecen solas.
+
+            clean_word = re.sub(
+                r"[^\wáéíóúüñÁÉÍÓÚÜÑ]",
+                "",
+                word
             )
-        ]
+
+            if len(clean_word) >= 8:
+
+                chunks.append(
+                    word
+                )
+
+                current = []
 
 
-    return "\n".join(lines)
+    if current:
+
+        chunks.append(
+            " ".join(current)
+        )
+
+
+    return chunks
 
 
 # ============================================================
-# RENDER DE UN JOB
+# CREAR SUBTITULOS ASS
+# ============================================================
+
+def create_ass_subtitles(
+    text,
+    duration,
+    output_file
+):
+
+    text = clean_text(text)
+
+    if not text:
+        return False
+
+
+    chunks = make_caption_chunks(
+        text
+    )
+
+    if not chunks:
+        return False
+
+
+    # --------------------------------------------------------
+    # Distribución del tiempo.
+    #
+    # Se pondera por longitud de cada bloque para que las
+    # palabras largas permanezcan un poco más.
+    # --------------------------------------------------------
+
+    weights = []
+
+    for chunk in chunks:
+
+        letters = len(
+            re.sub(
+                r"\s+",
+                "",
+                chunk
+            )
+        )
+
+        weights.append(
+            max(
+                1,
+                letters
+            )
+        )
+
+
+    total_weight = sum(
+        weights
+    )
+
+
+    # --------------------------------------------------------
+    # ASS
+    # --------------------------------------------------------
+
+    ass = []
+
+    ass.append(
+        "[Script Info]\n"
+    )
+
+    ass.append(
+        "ScriptType: v4.00+\n"
+    )
+
+    ass.append(
+        "PlayResX: 720\n"
+    )
+
+    ass.append(
+        "PlayResY: 1280\n"
+    )
+
+    ass.append(
+        "ScaledBorderAndShadow: yes\n"
+    )
+
+    ass.append(
+        "WrapStyle: 2\n"
+    )
+
+    ass.append(
+        "Collisions: Normal\n"
+    )
+
+    ass.append(
+        "\n"
+    )
+
+
+    # --------------------------------------------------------
+    # Estilo
+    #
+    # Blanco
+    # Contorno negro
+    # Sin caja
+    # Negrita
+    # Centrado
+    # --------------------------------------------------------
+
+    ass.append(
+        "[V4+ Styles]\n"
+    )
+
+    ass.append(
+        "Format: "
+        "Name,Fontname,Fontsize,"
+        "PrimaryColour,SecondaryColour,"
+        "OutlineColour,BackColour,"
+        "Bold,Italic,Underline,StrikeOut,"
+        "ScaleX,ScaleY,Spacing,Angle,"
+        "BorderStyle,Outline,Shadow,"
+        "Alignment,MarginL,MarginR,MarginV,"
+        "Encoding\n"
+    )
+
+
+    ass.append(
+        "Style: "
+        "TikTok,"
+        "DejaVu Sans,"
+        "48,"
+        "&H00FFFFFF,"
+        "&H00000000,"
+        "&H00000000,"
+        "&H00000000,"
+        "-1,0,0,0,"
+        "100,100,0,0,"
+        "1,3,0,"
+        "5,0,0,0,"
+        "1\n"
+    )
+
+
+    ass.append(
+        "\n"
+    )
+
+
+    # --------------------------------------------------------
+    # Eventos
+    # --------------------------------------------------------
+
+    ass.append(
+        "[Events]\n"
+    )
+
+    ass.append(
+        "Format: "
+        "Layer,Start,End,Style,"
+        "Name,MarginL,MarginR,MarginV,"
+        "Effect,Text\n"
+    )
+
+
+    current_time = 0.0
+
+
+    for index, chunk in enumerate(
+        chunks
+    ):
+
+        portion = (
+            weights[index]
+            /
+            total_weight
+        )
+
+
+        chunk_duration = (
+            duration
+            *
+            portion
+        )
+
+
+        start = current_time
+
+        end = (
+            current_time
+            +
+            chunk_duration
+        )
+
+
+        # ----------------------------------------------------
+        # Evitar subtítulos demasiado rápidos.
+        # ----------------------------------------------------
+
+        if (
+            end - start
+            <
+            0.35
+        ):
+
+            end = (
+                start
+                +
+                0.35
+            )
+
+
+        # ----------------------------------------------------
+        # Posición:
+        #
+        # 720 x 1280
+        #
+        # Centro X = 360
+        #
+        # Y ≈ 850
+        #
+        # Esto queda aproximadamente donde está el TikTok
+        # de referencia.
+        # ----------------------------------------------------
+
+        ass_text = (
+            r"{\an5\pos(360,850)}"
+            +
+            chunk.replace(
+                "{",
+                r"\{"
+            ).replace(
+                "}",
+                r"\}"
+            )
+        )
+
+
+        ass.append(
+
+            "Dialogue: "
+            f"0,"
+            f"{format_ass_time(start)},"
+            f"{format_ass_time(min(end, duration))},"
+            "TikTok,"
+            ",0,0,0,"
+            ","
+            f"{ass_text}\n"
+        )
+
+
+        current_time = end
+
+
+    output_file.write_text(
+        "".join(ass),
+        encoding="utf-8"
+    )
+
+
+    return True
+
+
+# ============================================================
+# RENDER DE ESCENAS
 # ============================================================
 
 def run_job(
@@ -257,7 +648,9 @@ def run_job(
         )
 
 
-        JOBS[job_id]["status"] = "rendering"
+        JOBS[job_id][
+            "status"
+        ] = "rendering"
 
 
         try:
@@ -265,11 +658,13 @@ def run_job(
             inputs = []
 
 
-            # ====================================================
-            # PROCESAR CADA ESCENA
-            # ====================================================
+            # =================================================
+            # ESCENAS
+            # =================================================
 
-            for i, scene in enumerate(scenes):
+            for i, scene in enumerate(
+                scenes
+            ):
 
 
                 # ------------------------------------------------
@@ -278,15 +673,21 @@ def run_job(
 
                 src = (
 
-                    scene.get("video_url")
+                    scene.get(
+                        "video_url"
+                    )
 
                     or
 
-                    scene.get("src")
+                    scene.get(
+                        "src"
+                    )
 
                     or
 
-                    scene.get("video_src")
+                    scene.get(
+                        "video_src"
+                    )
                 )
 
 
@@ -294,8 +695,9 @@ def run_job(
 
                     raise ValueError(
 
-                        f"Scene {i + 1} "
-                        "has no video source"
+                        f"La escena "
+                        f"{i + 1} no tiene "
+                        "video_url."
                     )
 
 
@@ -305,29 +707,39 @@ def run_job(
 
                 audio_url = (
 
-                    scene.get("audio_url")
+                    scene.get(
+                        "audio_url"
+                    )
 
                     or
 
-                    scene.get("audio_src")
+                    scene.get(
+                        "audio_src"
+                    )
                 )
 
 
                 # ------------------------------------------------
-                # SUBTITULO
+                # SUBTITULOS
                 # ------------------------------------------------
 
                 subtitle = (
 
-                    scene.get("subtitle")
+                    scene.get(
+                        "subtitle"
+                    )
 
                     or
 
-                    scene.get("voiceover")
+                    scene.get(
+                        "voiceover"
+                    )
 
                     or
 
-                    scene.get("text")
+                    scene.get(
+                        "text"
+                    )
 
                     or
 
@@ -335,7 +747,7 @@ def run_job(
                 )
 
 
-                subtitle = prepare_subtitle(
+                subtitle = clean_text(
                     subtitle
                 )
 
@@ -344,33 +756,22 @@ def run_job(
                 # DURACION
                 # ------------------------------------------------
 
-                duration = scene.get(
-                    "duration",
+                duration = safe_float(
+
+                    scene.get(
+                        "duration",
+                        7
+                    ),
+
                     7
                 )
-
-
-                try:
-
-                    duration = float(
-                        duration
-                    )
-
-                except Exception:
-
-                    duration = 7
-
-
-                if duration < 1:
-
-                    duration = 1
 
 
                 # ------------------------------------------------
                 # ARCHIVOS
                 # ------------------------------------------------
 
-                video_out = (
+                scene_video = (
 
                     job_dir
                     /
@@ -378,36 +779,24 @@ def run_job(
                 )
 
 
-                audio_out = None
+                scene_audio = None
 
 
-                subtitle_file = (
+                ass_file = (
 
                     job_dir
                     /
-                    f"subtitle_{i}.txt"
+                    f"subtitle_{i}.ass"
                 )
 
 
                 # ------------------------------------------------
-                # GUARDAR SUBTITULO
-                # ------------------------------------------------
-
-                subtitle_file.write_text(
-
-                    subtitle,
-
-                    encoding="utf-8"
-                )
-
-
-                # ------------------------------------------------
-                # DESCARGAR AUDIO
+                # AUDIO
                 # ------------------------------------------------
 
                 if audio_url:
 
-                    audio_out = (
+                    scene_audio = (
 
                         job_dir
                         /
@@ -419,32 +808,53 @@ def run_job(
 
                         audio_url,
 
-                        audio_out
+                        scene_audio
                     )
 
 
-                # =================================================
-                # FILTRO VIDEO BASE
-                # =================================================
+                # ------------------------------------------------
+                # SUBTITULOS ASS
+                # ------------------------------------------------
+
+                has_subtitles = False
+
+
+                if subtitle:
+
+                    has_subtitles = (
+                        create_ass_subtitles(
+
+                            subtitle,
+
+                            duration,
+
+                            ass_file
+
+                        )
+                    )
+
+
+                # ------------------------------------------------
+                # FILTRO VIDEO
+                # ------------------------------------------------
 
                 video_filter = (
 
                     "scale=720:1280:"
                     "force_original_aspect_ratio=increase,"
                     "crop=720:1280,"
-                    "fps=24"
+                    "fps=30"
                 )
 
 
-                # =================================================
-                # SUBTITULOS
-                # =================================================
+                # ------------------------------------------------
+                # INCRUSTAR SUBTITULOS
+                # ------------------------------------------------
 
-                if subtitle:
+                if has_subtitles:
 
-
-                    subtitle_path = (
-                        subtitle_file
+                    ass_path = (
+                        ass_file
                         .as_posix()
                         .replace(
                             "\\",
@@ -454,57 +864,21 @@ def run_job(
 
 
                     # ------------------------------------------------
-                    # Caja de subtítulos
-                    #
-                    # Dejamos un ancho fijo dentro del vídeo.
-                    # Esto hace que el texto quede realmente centrado.
+                    # FFmpeg subtitles filter
                     # ------------------------------------------------
 
-                    subtitle_filter = (
-
-                        ",drawtext="
-
-                        "fontfile=/usr/share/fonts/truetype/dejavu/"
-                        "DejaVuSans-Bold.ttf:"
-
-                        f"textfile='{subtitle_path}':"
-
-                        "fontcolor=white:"
-
-                        "fontsize=48:"
-
-                        "line_spacing=6:"
-
-                        "borderw=4:"
-
-                        "bordercolor=black:"
-
-                        "box=1:"
-
-                        "boxcolor=black@0.60:"
-
-                        "boxborderw=18:"
-
-                        "boxw=620:"
-
-                        "text_align=center:"
-
-                        "x=50:"
-
-                        "y=h-360"
-                    )
-
-
                     video_filter += (
-                        subtitle_filter
+
+                        ",subtitles="
+                        f"'{ass_path}'"
                     )
 
 
                 # =================================================
-                # FFMPEG CON AUDIO
+                # CON AUDIO
                 # =================================================
 
-                if audio_out:
+                if scene_audio:
 
 
                     command = [
@@ -520,7 +894,7 @@ def run_job(
                         src,
 
                         "-i",
-                        str(audio_out),
+                        str(scene_audio),
 
                         "-t",
                         str(duration),
@@ -543,6 +917,9 @@ def run_job(
                         "-crf",
                         "28",
 
+                        "-pix_fmt",
+                        "yuv420p",
+
                         "-c:a",
                         "aac",
 
@@ -551,15 +928,15 @@ def run_job(
 
                         "-shortest",
 
-                        "-pix_fmt",
-                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
 
-                        str(video_out)
+                        str(scene_video)
                     ]
 
 
                 # =================================================
-                # FFMPEG SIN AUDIO
+                # SIN AUDIO
                 # =================================================
 
                 else:
@@ -597,12 +974,15 @@ def run_job(
 
                         "-an",
 
-                        str(video_out)
+                        "-movflags",
+                        "+faststart",
+
+                        str(scene_video)
                     ]
 
 
                 # =================================================
-                # RENDER
+                # EJECUTAR FFMPEG
                 # =================================================
 
                 result = subprocess.run(
@@ -621,45 +1001,42 @@ def run_job(
 
                     raise RuntimeError(
 
-                        f"Error rendering scene "
-                        f"{i + 1}:\n"
-                        f"{result.stderr[-4000:]}"
+                        f"Error renderizando "
+                        f"escena {i + 1}:\n"
+                        +
+                        result.stderr[-5000:]
                     )
 
 
                 inputs.append(
-                    video_out
+                    scene_video
                 )
 
 
                 # ------------------------------------------------
-                # BORRAR AUDIO TEMPORAL
+                # LIMPIEZA
                 # ------------------------------------------------
 
                 if (
-                    audio_out
+                    scene_audio
                     and
-                    audio_out.exists()
+                    scene_audio.exists()
                 ):
 
-                    audio_out.unlink(
+                    scene_audio.unlink(
                         missing_ok=True
                     )
 
 
-                # ------------------------------------------------
-                # BORRAR TEXTO TEMPORAL
-                # ------------------------------------------------
+                if ass_file.exists():
 
-                if subtitle_file.exists():
-
-                    subtitle_file.unlink(
+                    ass_file.unlink(
                         missing_ok=True
                     )
 
 
             # ====================================================
-            # CONCATENAR ESCENAS
+            # CONCATENAR
             # ====================================================
 
             concat_file = (
@@ -677,7 +1054,11 @@ def run_job(
 
                 concat_lines.append(
 
-                    f"file '{video_file.as_posix()}'\n"
+                    "file '"
+                    +
+                    video_file.as_posix()
+                    +
+                    "'\n"
                 )
 
 
@@ -743,14 +1124,15 @@ def run_job(
 
                 raise RuntimeError(
 
-                    "Error concatenating scenes:\n"
+                    "Error concatenando "
+                    "las escenas:\n"
                     +
-                    result.stderr[-4000:]
+                    result.stderr[-5000:]
                 )
 
 
             # ====================================================
-            # JOB COMPLETADO
+            # COMPLETADO
             # ====================================================
 
             JOBS[job_id].update(
@@ -816,13 +1198,19 @@ def health():
 
         ok=True,
 
-        service="n8n-free-ffmpeg-renderer",
+        service=(
+            "n8n-free-ffmpeg-renderer"
+        ),
 
-        version=6,
+        version=7,
 
         tts="edge-tts",
 
-        subtitles=True
+        subtitles=True,
+
+        subtitle_style=(
+            "tiktok-word-captions"
+        )
     )
 
 
@@ -837,9 +1225,11 @@ def root():
 
         ok=True,
 
-        service="n8n-free-ffmpeg-renderer",
+        service=(
+            "n8n-free-ffmpeg-renderer"
+        ),
 
-        version=6,
+        version=7,
 
         tts="edge-tts",
 
@@ -856,18 +1246,22 @@ def tts():
 
     try:
 
-        data = request.get_json(
-            silent=True
-        ) or {}
+        data = (
+            request.get_json(
+                silent=True
+            )
+            or
+            {}
+        )
 
 
-        text = str(
+        text = clean_text(
 
             data.get(
                 "text",
                 ""
             )
-        ).strip()
+        )
 
 
         voice = str(
@@ -883,7 +1277,9 @@ def tts():
 
             return jsonify(
 
-                error="No text supplied."
+                error=(
+                    "No text supplied."
+                )
 
             ), 400
 
@@ -922,8 +1318,8 @@ def tts():
 
             raise RuntimeError(
 
-                "TTS did not create "
-                "an audio file."
+                "TTS no creó "
+                "el archivo de audio."
             )
 
 
@@ -986,8 +1382,8 @@ def upload_audio():
 
                 error=(
                     "No audio file supplied. "
-                    "Use multipart field "
-                    "'file' or 'data'."
+                    "Usa el campo multipart "
+                    "'file' o 'data'."
                 )
 
             ), 400
@@ -1048,9 +1444,14 @@ def upload_audio():
 @app.post("/render")
 def render():
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    data = (
+
+        request.get_json(
+            silent=True
+        )
+        or
+        {}
+    )
 
 
     scenes = data.get(
@@ -1084,8 +1485,8 @@ def render():
         return jsonify(
 
             error=(
-                "Se requiere al menos "
-                "una escena."
+                "Se necesita "
+                "al menos una escena."
             ),
 
             id=None,
@@ -1162,9 +1563,12 @@ def render():
         )
 
 
-        # IMPORTANTE:
-        # Ahora conservamos el subtítulo
-        # que llega desde n8n.
+        # --------------------------------------------------------
+        # IMPORTANTE
+        #
+        # Aceptamos subtitle, voiceover o text.
+        # Esto hace que no tengas que cambiar n8n.
+        # --------------------------------------------------------
 
         subtitle = (
 
@@ -1185,13 +1589,17 @@ def render():
             )
 
             or
-
             ""
         )
 
 
-        duration = scene.get(
-            "duration",
+        duration = safe_float(
+
+            scene.get(
+                "duration",
+                7
+            ),
+
             7
         )
 
@@ -1217,7 +1625,9 @@ def render():
 
             status="failed",
 
-            error="No valid scenes."
+            error=(
+                "No hay escenas válidas."
+            )
         )
 
 
@@ -1252,7 +1662,9 @@ def render():
 # STATUS
 # ============================================================
 
-@app.get("/status/<job_id>")
+@app.get(
+    "/status/<job_id>"
+)
 def status(job_id):
 
     job = JOBS.get(
@@ -1265,8 +1677,8 @@ def status(job_id):
         return jsonify(
 
             error=(
-                "No render was found "
-                "with that ID."
+                "No existe un render "
+                "con ese ID."
             )
 
         ), 404
@@ -1319,7 +1731,7 @@ def audio_file(filename):
 
 
 # ============================================================
-# START SERVER
+# START
 # ============================================================
 
 if __name__ == "__main__":
