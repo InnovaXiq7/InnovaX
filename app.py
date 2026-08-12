@@ -570,7 +570,7 @@ def health():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=7,
+        version=8,
 
         tts="edge-tts",
 
@@ -595,7 +595,7 @@ def root():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=7,
+        version=8,
 
         tts="edge-tts",
 
@@ -902,6 +902,49 @@ def transcribe():
             data.get("url")
         )
 
+        # ====================================================
+        # LIMPIAR URL RECIBIDA
+        # ====================================================
+
+        if video_url:
+
+            video_url = str(
+                video_url
+            ).strip()
+
+            # n8n puede mandar accidentalmente:
+            # =https://...
+            if video_url.startswith("="):
+
+                video_url = (
+                    video_url[1:]
+                    .strip()
+                )
+
+            # Eliminar comillas si llegan
+            if (
+                len(video_url) >= 2
+                and
+                (
+                    (
+                        video_url.startswith('"')
+                        and
+                        video_url.endswith('"')
+                    )
+                    or
+                    (
+                        video_url.startswith("'")
+                        and
+                        video_url.endswith("'")
+                    )
+                )
+            ):
+
+                video_url = (
+                    video_url[1:-1]
+                    .strip()
+                )
+
         if not video_url:
 
             return jsonify(
@@ -922,6 +965,29 @@ def transcribe():
             video_url
         )
 
+        # ====================================================
+        # VALIDAR URL
+        # ====================================================
+
+        if not (
+            video_url.startswith(
+                "http://"
+            )
+            or
+            video_url.startswith(
+                "https://"
+            )
+        ):
+
+            raise ValueError(
+                "video_url no es una URL HTTP/HTTPS válida: "
+                + video_url
+            )
+
+        # ====================================================
+        # ARCHIVO TEMPORAL
+        # ====================================================
+
         temp_id = uuid.uuid4().hex
 
         input_file = (
@@ -930,8 +996,12 @@ def transcribe():
         )
 
         # ====================================================
-        # EXTRAER AUDIO DEL VIDEO
+        # EXTRAER AUDIO
         # ====================================================
+
+        print(
+            "[WHISPER] Extrayendo audio..."
+        )
 
         result = subprocess.run(
 
@@ -1098,7 +1168,7 @@ def transcribe():
             })
 
         # ====================================================
-        # LIMPIAR
+        # LIMPIAR AUDIO TEMPORAL
         # ====================================================
 
         input_file.unlink(
@@ -1106,7 +1176,7 @@ def transcribe():
         )
 
         # ====================================================
-        # RESULTADO
+        # INFORMACIÓN DEL IDIOMA
         # ====================================================
 
         detected_language = (
@@ -1137,6 +1207,10 @@ def transcribe():
         print(
             "[WHISPER] Transcripción terminada."
         )
+
+        # ====================================================
+        # RESULTADO
+        # ====================================================
 
         return jsonify({
 
