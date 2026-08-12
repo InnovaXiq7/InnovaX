@@ -1,265 +1,1038 @@
 import os
-import time
-import urllib.request
+import uuid
+import shutil
 import subprocess
-import traceback
-import tempfile
 import threading
-import gc
-from flask import Flask, jsonify, request, send_from_directory, send_file
+import asyncio
+from pathlib import Path
 
-app = Flask(__name__, static_folder='.', static_url_path='')
+from flask import Flask, request, jsonify, send_from_directory
+import edge_tts
 
-# Directorios absolutos para el entorno de Render
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
-TEMP_DIR = os.path.join(tempfile.gettempdir(), 'innovax_renders')
 
-os.makedirs(ASSETS_DIR, exist_ok=True)
-os.makedirs(TEMP_DIR, exist_ok=True)
+app = Flask(__name__)
 
-jobs_status = {}
-render_lock = threading.Lock()
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
-def download_file(url, destination_path):
-    req = urllib.request.Request(
-        url, 
-        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+BASE = Path("/tmp/innovax")
+BASE.mkdir(parents=True, exist_ok=True)
+
+AUDIO_DIR = BASE / "audio"
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+VIDEO_DIR = BASE / "video"
+VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+JOBS = {}
+
+RENDER_LOCK = threading.Lock()
+
+# Máximo de subida: 1 GB
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
+
+
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL",
+    ""
+).rstrip("/")
+
+
+# ============================================================
+# URL PÚBLICA
+# ============================================================
+
+def public_url(path):
+    base = PUBLIC_BASE_URL
+
+    if not base:
+        hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+        if hostname:
+            base = f"https://{hostname}"
+        else:
+            base = request.host_url.rstrip("/")
+
+    return f"{base}{path}"
+
+
+# ============================================================
+# LIMPIAR JOB
+# ============================================================
+
+def clean_job(job_id):
+    job_dir = BASE / job_id
+
+    if job_dir.exists():
+        shutil.rmtree(
+            job_dir,
+            ignore_errors=True
+        )
+
+
+# ============================================================
+# DESCARGAR AUDIO
+# ============================================================
+
+def download_audio(url, output_file):
+
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-threads",
+            "1",
+            "-i",
+            url,
+            "-vn",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            str(output_file)
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True
     )
-    with urllib.request.urlopen(req, timeout=30) as response, open(destination_path, 'wb') as out_file:
-        out_file.write(response.read())
 
-@app.route('/')
-def index():
-    return send_from_directory('.', 'index.html')
+    if result.returncode != 0:
 
-@app.route('/assets/<path:filename>', methods=['GET'])
-def serve_assets(filename):
-    local_asset_path = os.path.join(ASSETS_DIR, filename)
-    if os.path.exists(local_asset_path) and os.path.getsize(local_asset_path) > 0:
-        mimetype = 'video/mp4' if filename.endswith('.mp4') else ('audio/mpeg' if filename.endswith('.mp3') else None)
-        return send_file(local_asset_path, mimetype=mimetype)
+        raise RuntimeError(
+            "Error descargando audio:\n"
+            + result.stderr[-3000:]
+        )
 
-    temp_file_path = os.path.join(TEMP_DIR, filename)
-    if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
-        mimetype = 'video/mp4' if filename.endswith('.mp4') else ('audio/mpeg' if filename.endswith('.mp3') else None)
-        return send_file(temp_file_path, mimetype=mimetype)
 
-    if filename.endswith('.mp4'):
-        fallback_path = os.path.join(TEMP_DIR, f"fallback_{filename}")
-        if not os.path.exists(fallback_path):
-            build_fallback_video(fallback_path)
-        return send_file(fallback_path, mimetype='video/mp4')
+# ============================================================
+# EDGE TTS
+# ============================================================
 
-    return jsonify({"error": "File not found"}), 404
+async def generate_tts_async(
+    text,
+    voice,
+    output_file
+):
 
-@app.route('/tts', methods=['POST'])
-def handle_tts():
-    try:
-        data = request.json or {}
-        timestamp = int(time.time() * 1000)
-        job_id = f"job_tts_{timestamp}"
-        filename = f"tts_{job_id}.mp3"
-        file_path = os.path.join(ASSETS_DIR, filename)
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=voice,
+        rate="+0%",
+        volume="+0%",
+        pitch="+0Hz"
+    )
 
-        # Generar un archivo estático de prueba para asegurar respuesta válida
-        cmd = [
-            'ffmpeg', '-y',
-            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-            '-t', '3',
-            '-c:a', 'libmp3lame', '-b:a', '128k',
-            file_path
-        ]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    await communicate.save(
+        str(output_file)
+    )
 
-        public_url = data.get("output_url", f"https://innovax.onrender.com/assets/{filename}")
-        
-        jobs_status[job_id] = {
-            "status": "completed",
-            "job_id": job_id,
-            "public_url": public_url,
-            "url": public_url
-        }
-        return jsonify(jobs_status[job_id]), 200
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
 
-def build_fallback_video(output_path):
-    cmd = [
-        'ffmpeg', '-y',
-        '-threads', '2',
-        '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=5',
-        '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-        '-t', '5',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '128k',
-        output_path
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def generate_tts(
+    text,
+    voice,
+    output_file
+):
 
-def render_worker(job_id, data, output_filename, output_path):
-    with render_lock:
-        print(f"\n================ [INICIO TRABAJO {job_id}] ================")
+    asyncio.run(
+        generate_tts_async(
+            text,
+            voice,
+            output_file
+        )
+    )
+
+
+# ============================================================
+# RENDER JOB
+# ============================================================
+
+def run_job(
+    job_id,
+    scenes
+):
+
+    with RENDER_LOCK:
+
+        job_dir = BASE / job_id
+
+        job_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        JOBS[job_id]["status"] = "rendering"
+
         try:
-            movie_data = data.get("movie", {})
-            scenes = movie_data.get("scenes", [])
-            valid_clip_files = []
 
-            for idx, scene in enumerate(scenes):
-                video_url = scene.get("video_url", "")
-                audio_url = scene.get("audio_url", "")
-                scene_duration = str(scene.get("duration", 5))
+            inputs = []
 
-                is_image = any(ext in video_url.lower() for ext in ['.jpg', '.png', '.jpeg', 'pollinations']) or not video_url.endswith('.mp4')
-                file_ext = ".jpg" if is_image else ".mp4"
+            # =================================================
+            # PROCESAR ESCENAS
+            # =================================================
 
-                raw_v = os.path.join(TEMP_DIR, f"{job_id}_raw_v_{idx}{file_ext}")
-                raw_a = os.path.join(TEMP_DIR, f"{job_id}_raw_a_{idx}.mp3")
-                clip_out = os.path.join(TEMP_DIR, f"{job_id}_clip_{idx}.mp4")
+            for i, scene in enumerate(scenes):
 
-                if video_url:
-                    try:
-                        download_file(video_url, raw_v)
+                src = (
+                    scene.get("video_url")
+                    or scene.get("src")
+                    or scene.get("video_src")
+                )
 
-                        has_audio = False
-                        if audio_url:
-                            try:
-                                download_file(audio_url, raw_a)
-                                if os.path.exists(raw_a) and os.path.getsize(raw_a) > 0:
-                                    has_audio = True
-                            except Exception as a_err:
-                                print(f"[Aviso]: No se pudo descargar audio para escena {idx}: {a_err}")
+                if not src:
 
-                        if is_image:
-                            # Procesamiento directo y compatible para imágenes verticales en FFmpeg
-                            if has_audio:
-                                clip_cmd = [
-                                    'ffmpeg', '-y', '-threads', '2',
-                                    '-loop', '1', '-i', raw_v,
-                                    '-i', raw_a,
-                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p",
-                                    '-c:v', 'libx264', '-preset', 'ultrafast',
-                                    '-c:a', 'aac', '-b:a', '128k',
-                                    '-shortest',
-                                    clip_out
-                                ]
-                            else:
-                                clip_cmd = [
-                                    'ffmpeg', '-y', '-threads', '2',
-                                    '-loop', '1', '-i', raw_v,
-                                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-                                    '-t', scene_duration,
-                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p",
-                                    '-c:v', 'libx264', '-preset', 'ultrafast',
-                                    '-c:a', 'aac', '-b:a', '128k',
-                                    clip_out
-                                ]
-                        else:
-                            # Clip de vídeo estándar
-                            if has_audio:
-                                clip_cmd = [
-                                    'ffmpeg', '-y', '-threads', '2',
-                                    '-i', raw_v, '-i', raw_a,
-                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p",
-                                    '-c:v', 'libx264', '-preset', 'ultrafast',
-                                    '-c:a', 'aac', '-b:a', '128k',
-                                    '-shortest',
-                                    clip_out
-                                ]
-                            else:
-                                clip_cmd = [
-                                    'ffmpeg', '-y', '-threads', '2',
-                                    '-i', raw_v,
-                                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p",
-                                    '-c:v', 'libx264', '-preset', 'ultrafast',
-                                    '-c:a', 'aac', '-b:a', '128k',
-                                    clip_out
-                                ]
+                    raise ValueError(
+                        f"Scene {i + 1} has no video source"
+                    )
 
-                        res = subprocess.run(clip_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                audio_url = (
+                    scene.get("audio_url")
+                    or scene.get("audio_src")
+                )
 
-                        if os.path.exists(raw_v): os.remove(raw_v)
-                        if os.path.exists(raw_a): os.remove(raw_a)
+                duration = scene.get(
+                    "duration",
+                    7
+                )
 
-                        if res.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
-                            valid_clip_files.append(clip_out)
-                        else:
-                            print(f"[FFmpeg Error Escena {idx}]: {res.stderr}")
+                try:
 
-                    except Exception as clip_err:
-                        print(f"[Error en escena {idx}]: {str(clip_err)}")
+                    duration = float(
+                        duration
+                    )
 
-            if valid_clip_files:
-                concat_list_path = os.path.join(TEMP_DIR, f"{job_id}_concat.txt")
-                with open(concat_list_path, 'w') as f:
-                    for clip in valid_clip_files:
-                        f.write(f"file '{clip}'\n")
+                except Exception:
 
-                concat_cmd = [
-                    'ffmpeg', '-y', '-threads', '2',
-                    '-f', 'concat', '-safe', '0',
-                    '-i', concat_list_path,
-                    '-c', 'copy',
-                    output_path
-                ]
-                subprocess.run(concat_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    duration = 7
 
-                for clip in valid_clip_files:
-                    if os.path.exists(clip): os.remove(clip)
-                if os.path.exists(concat_list_path): os.remove(concat_list_path)
+                if duration < 1:
+                    duration = 1
 
-            else:
-                build_fallback_video(output_path)
+                video_out = (
+                    job_dir
+                    / f"scene_{i}.mp4"
+                )
+
+                audio_out = None
+
+                # =================================================
+                # CON AUDIO
+                # =================================================
+
+                if audio_url:
+
+                    audio_out = (
+                        job_dir
+                        / f"audio_{i}.m4a"
+                    )
+
+                    download_audio(
+                        audio_url,
+                        audio_out
+                    )
+
+                    command = [
+
+                        "ffmpeg",
+
+                        "-y",
+
+                        "-threads",
+                        "1",
+
+                        "-i",
+                        src,
+
+                        "-i",
+                        str(audio_out),
+
+                        "-t",
+                        str(duration),
+
+                        "-vf",
+
+                        (
+                            "scale=720:1280:"
+                            "force_original_aspect_ratio=increase,"
+                            "crop=720:1280,"
+                            "fps=24"
+                        ),
+
+                        "-map",
+                        "0:v:0",
+
+                        "-map",
+                        "1:a:0",
+
+                        "-c:v",
+                        "libx264",
+
+                        "-preset",
+                        "ultrafast",
+
+                        "-crf",
+                        "28",
+
+                        "-c:a",
+                        "aac",
+
+                        "-b:a",
+                        "128k",
+
+                        "-shortest",
+
+                        "-pix_fmt",
+                        "yuv420p",
+
+                        str(video_out)
+                    ]
+
+                # =================================================
+                # SIN AUDIO
+                # =================================================
+
+                else:
+
+                    command = [
+
+                        "ffmpeg",
+
+                        "-y",
+
+                        "-threads",
+                        "1",
+
+                        "-i",
+                        src,
+
+                        "-t",
+                        str(duration),
+
+                        "-vf",
+
+                        (
+                            "scale=720:1280:"
+                            "force_original_aspect_ratio=increase,"
+                            "crop=720:1280,"
+                            "fps=24"
+                        ),
+
+                        "-c:v",
+                        "libx264",
+
+                        "-preset",
+                        "ultrafast",
+
+                        "-crf",
+                        "28",
+
+                        "-pix_fmt",
+                        "yuv420p",
+
+                        "-an",
+
+                        str(video_out)
+                    ]
+
+                # =================================================
+                # EJECUTAR FFMPEG
+                # =================================================
+
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+
+                if result.returncode != 0:
+
+                    raise RuntimeError(
+                        f"Error rendering scene {i + 1}:\n"
+                        f"{result.stderr[-4000:]}"
+                    )
+
+                inputs.append(
+                    video_out
+                )
+
+                if (
+                    audio_out
+                    and audio_out.exists()
+                ):
+
+                    audio_out.unlink(
+                        missing_ok=True
+                    )
+
+            # =================================================
+            # CONCATENAR ESCENAS
+            # =================================================
+
+            concat_file = (
+                job_dir
+                / "concat.txt"
+            )
+
+            concat_lines = []
+
+            for video_file in inputs:
+
+                concat_lines.append(
+                    f"file '{video_file.as_posix()}'\n"
+                )
+
+            concat_file.write_text(
+                "".join(concat_lines),
+                encoding="utf-8"
+            )
+
+            final_file = (
+                job_dir
+                / "final.mp4"
+            )
+
+            concat_command = [
+
+                "ffmpeg",
+
+                "-y",
+
+                "-threads",
+                "1",
+
+                "-f",
+                "concat",
+
+                "-safe",
+                "0",
+
+                "-i",
+                str(concat_file),
+
+                "-c",
+                "copy",
+
+                "-movflags",
+                "+faststart",
+
+                str(final_file)
+            ]
+
+            result = subprocess.run(
+                concat_command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
+            if result.returncode != 0:
+
+                raise RuntimeError(
+                    "Error concatenating scenes:\n"
+                    + result.stderr[-4000:]
+                )
+
+            # =================================================
+            # JOB COMPLETADO
+            # =================================================
+
+            JOBS[job_id].update(
+
+                status="succeeded",
+
+                url=public_url(
+                    f"/files/{job_id}/final.mp4"
+                ),
+
+                local_url=(
+                    f"/files/{job_id}/final.mp4"
+                )
+            )
+
+            # =================================================
+            # LIMPIEZA
+            # =================================================
+
+            for video_file in inputs:
+
+                video_file.unlink(
+                    missing_ok=True
+                )
+
+            concat_file.unlink(
+                missing_ok=True
+            )
 
         except Exception as e:
-            print(f"[ERROR GLOBAL RENDER]: {str(e)}")
-            build_fallback_video(output_path)
 
-        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            build_fallback_video(output_path)
+            JOBS[job_id].update(
 
-        gc.collect()
+                status="failed",
 
-        public_url = f"https://innovax.onrender.com/assets/{output_filename}"
-        jobs_status[job_id] = {
-            "status": "completed",
-            "job_id": job_id,
-            "public_url": public_url
+                error=str(e)
+            )
+
+            clean_job(
+                job_id
+            )
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return jsonify(
+
+        ok=True,
+
+        service="n8n-free-ffmpeg-renderer",
+
+        version=6,
+
+        tts="edge-tts",
+
+        video_upload=True
+    )
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+def root():
+
+    return jsonify(
+
+        ok=True,
+
+        service="n8n-free-ffmpeg-renderer",
+
+        version=6,
+
+        tts="edge-tts",
+
+        video_upload=True
+    )
+
+
+# ============================================================
+# TTS
+# ============================================================
+
+@app.post("/tts")
+def tts():
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        text = str(
+            data.get(
+                "text",
+                ""
+            )
+        ).strip()
+
+        voice = str(
+            data.get(
+                "voice",
+                "es-ES-AlvaroNeural"
+            )
+        ).strip()
+
+        if not text:
+
+            return jsonify(
+                error="No text supplied."
+            ), 400
+
+        if not voice:
+
+            voice = "es-ES-AlvaroNeural"
+
+        audio_id = uuid.uuid4().hex
+
+        filename = (
+            f"{audio_id}.mp3"
+        )
+
+        output_file = (
+            AUDIO_DIR
+            / filename
+        )
+
+        generate_tts(
+            text,
+            voice,
+            output_file
+        )
+
+        if not output_file.exists():
+
+            raise RuntimeError(
+                "TTS did not create an audio file."
+            )
+
+        path = (
+            f"/files/audio/{filename}"
+        )
+
+        return jsonify(
+
+            id=audio_id,
+
+            voice=voice,
+
+            url=path,
+
+            public_url=public_url(
+                path
+            )
+        )
+
+    except Exception as e:
+
+        return jsonify(
+            error=str(e)
+        ), 500
+
+
+# ============================================================
+# UPLOAD AUDIO
+# ============================================================
+
+@app.post("/upload-audio")
+def upload_audio():
+
+    try:
+
+        audio = (
+            request.files.get("file")
+            or
+            request.files.get("data")
+        )
+
+        if not audio:
+
+            return jsonify(
+
+                error=(
+                    "No audio file supplied. "
+                    "Use multipart field "
+                    "'file' or 'data'."
+                )
+
+            ), 400
+
+        audio_id = uuid.uuid4().hex
+
+        filename = (
+            f"{audio_id}.mp3"
+        )
+
+        output_file = (
+            AUDIO_DIR
+            / filename
+        )
+
+        audio.save(
+            output_file
+        )
+
+        path = (
+            f"/files/audio/{filename}"
+        )
+
+        return jsonify(
+
+            id=audio_id,
+
+            url=path,
+
+            public_url=public_url(
+                path
+            )
+        )
+
+    except Exception as e:
+
+        return jsonify(
+            error=str(e)
+        ), 500
+
+
+# ============================================================
+# NUEVO: UPLOAD VIDEO
+# ============================================================
+
+@app.post("/upload-video")
+def upload_video():
+
+    try:
+
+        video = (
+            request.files.get("file")
+            or
+            request.files.get("data")
+            or
+            request.files.get("video")
+        )
+
+        if not video:
+
+            return jsonify(
+
+                error=(
+                    "No video file supplied. "
+                    "Use multipart field "
+                    "'file', 'data' or 'video'."
+                )
+
+            ), 400
+
+        original_name = (
+            video.filename
+            or "video.mp4"
+        )
+
+        extension = (
+            Path(
+                original_name
+            ).suffix.lower()
+        )
+
+        allowed_extensions = {
+
+            ".mp4",
+            ".mov",
+            ".mkv",
+            ".webm",
+            ".avi",
+            ".m4v"
         }
 
-@app.route('/render', methods=['POST'])
-def start_render():
-    data = request.json or {}
-    job_id = f"job_render_{int(time.time() * 1000)}"
-    output_filename = f"video_{job_id}.mp4"
-    output_path = os.path.join(TEMP_DIR, output_filename)
+        if extension not in allowed_extensions:
 
-    jobs_status[job_id] = {
-        "status": "processing",
-        "job_id": job_id,
-        "public_url": f"https://innovax.onrender.com/assets/{output_filename}"
+            extension = ".mp4"
+
+        video_id = uuid.uuid4().hex
+
+        filename = (
+            f"{video_id}{extension}"
+        )
+
+        output_file = (
+            VIDEO_DIR
+            / filename
+        )
+
+        video.save(
+            output_file
+        )
+
+        if not output_file.exists():
+
+            raise RuntimeError(
+                "El vídeo no se pudo guardar."
+            )
+
+        file_size = (
+            output_file.stat().st_size
+        )
+
+        path = (
+            f"/files/video/{filename}"
+        )
+
+        return jsonify(
+
+            ok=True,
+
+            id=video_id,
+
+            filename=filename,
+
+            original_filename=original_name,
+
+            size=file_size,
+
+            url=path,
+
+            public_url=public_url(
+                path
+            )
+        )
+
+    except Exception as e:
+
+        return jsonify(
+            error=str(e)
+        ), 500
+
+
+# ============================================================
+# SERVIR VIDEOS SUBIDOS
+# ============================================================
+
+@app.get("/files/video/<filename>")
+def video_file(filename):
+
+    return send_from_directory(
+
+        VIDEO_DIR,
+
+        filename,
+
+        as_attachment=False
+    )
+
+
+# ============================================================
+# RENDER
+# ============================================================
+
+@app.post("/render")
+def render():
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    scenes = data.get(
+        "scenes"
+    )
+
+    if not isinstance(
+        scenes,
+        list
+    ):
+
+        return jsonify(
+
+            error=(
+                "El campo scenes "
+                "debe ser una lista."
+            ),
+
+            id=None,
+
+            status="failed",
+
+            url=None
+
+        ), 400
+
+    if len(scenes) < 1:
+
+        return jsonify(
+
+            error=(
+                "Se requiere "
+                "al menos una escena."
+            ),
+
+            id=None,
+
+            status="failed",
+
+            url=None
+
+        ), 400
+
+    job_id = uuid.uuid4().hex
+
+    JOBS[job_id] = {
+
+        "id": job_id,
+
+        "status": "queued",
+
+        "url": None,
+
+        "error": None
     }
 
-    thread = threading.Thread(target=render_worker, args=(job_id, data, output_filename, output_path))
-    thread.daemon = True
-    thread.start()
+    normalized = []
 
-    return jsonify(jobs_status[job_id]), 200
+    for index, scene in enumerate(
+        scenes
+    ):
 
-@app.route('/status/<job_id>', methods=['GET'])
-def get_status(job_id):
-    job = jobs_status.get(job_id)
+        if not isinstance(
+            scene,
+            dict
+        ):
+            continue
+
+        src = (
+            scene.get("video_url")
+            or
+            scene.get("src")
+        )
+
+        audio_url = (
+            scene.get("audio_url")
+            or
+            scene.get("audio_src")
+        )
+
+        duration = scene.get(
+            "duration",
+            7
+        )
+
+        normalized.append({
+
+            "index": index,
+
+            "video_url": src,
+
+            "audio_url": audio_url,
+
+            "duration": duration
+        })
+
+    if not normalized:
+
+        JOBS[job_id].update(
+
+            status="failed",
+
+            error="No valid scenes."
+        )
+
+        return jsonify(
+            JOBS[job_id]
+        ), 400
+
+    threading.Thread(
+
+        target=run_job,
+
+        args=(
+            job_id,
+            normalized
+        ),
+
+        daemon=True
+
+    ).start()
+
+    return jsonify(
+        JOBS[job_id]
+    )
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+@app.get("/status/<job_id>")
+def status(job_id):
+
+    job = JOBS.get(
+        job_id
+    )
+
     if not job:
-        public_url = f"https://innovax.onrender.com/assets/video_{job_id}.mp4"
-        return jsonify({
-            "status": "completed",
-            "job_id": job_id,
-            "public_url": public_url
-        }), 200
-    return jsonify(job), 200
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+        return jsonify(
+
+            error=(
+                "No render was found "
+                "with that ID."
+            )
+
+        ), 404
+
+    return jsonify(
+        job
+    )
+
+
+# ============================================================
+# ARCHIVOS DE RENDER
+# ============================================================
+
+@app.get(
+    "/files/<job_id>/<filename>"
+)
+def render_file(
+    job_id,
+    filename
+):
+
+    return send_from_directory(
+
+        BASE / job_id,
+
+        filename,
+
+        as_attachment=False
+    )
+
+
+# ============================================================
+# ARCHIVOS DE AUDIO
+# ============================================================
+
+@app.get(
+    "/files/audio/<filename>"
+)
+def audio_file(
+    filename
+):
+
+    return send_from_directory(
+
+        AUDIO_DIR,
+
+        filename,
+
+        as_attachment=False
+    )
+
+
+# ============================================================
+# ERROR: ARCHIVO DEMASIADO GRANDE
+# ============================================================
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+
+    return jsonify(
+
+        error=(
+            "El archivo supera "
+            "el límite máximo de 1 GB."
+        )
+
+    ), 413
+
+
+# ============================================================
+# START
+# ============================================================
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+    app.run(
+
+        host="0.0.0.0",
+
+        port=port
+    )
