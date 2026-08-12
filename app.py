@@ -43,10 +43,9 @@ PUBLIC_BASE_URL = os.environ.get(
 # WHISPER
 # ============================================================
 
-# tiny consume mucha menos memoria que base
 WHISPER_MODEL_SIZE = os.environ.get(
     "WHISPER_MODEL",
-    "tiny"
+    "base"
 )
 
 WHISPER_MODEL = None
@@ -127,7 +126,10 @@ def clean_job(job_id):
 # DESCARGAR AUDIO
 # ============================================================
 
-def download_audio(url, output_file):
+def download_audio(
+    url,
+    output_file
+):
 
     result = subprocess.run(
 
@@ -198,8 +200,11 @@ def generate_tts(
     asyncio.run(
 
         generate_tts_async(
+
             text,
+
             voice,
+
             output_file
         )
     )
@@ -259,7 +264,9 @@ def run_job(
 
                 try:
 
-                    duration = float(duration)
+                    duration = float(
+                        duration
+                    )
 
                 except Exception:
 
@@ -500,6 +507,10 @@ def run_job(
                     + result.stderr[-4000:]
                 )
 
+            # =================================================
+            # JOB COMPLETADO
+            # =================================================
+
             JOBS[job_id].update(
 
                 status="succeeded",
@@ -512,6 +523,10 @@ def run_job(
                     f"/files/{job_id}/final.mp4"
                 )
             )
+
+            # =================================================
+            # LIMPIEZA
+            # =================================================
 
             for video_file in inputs:
 
@@ -581,9 +596,7 @@ def root():
 
         video_upload=True,
 
-        transcription=True,
-
-        whisper_model=WHISPER_MODEL_SIZE
+        transcription=True
     )
 
 
@@ -864,37 +877,44 @@ def video_file(filename):
 
 
 # ============================================================
-# TRANSCRIBIR VIDEO
+# TRANSCRIBIR VIDEO CON WHISPER
 # ============================================================
 
 @app.post("/transcribe")
 def transcribe():
 
     input_file = None
-    should_delete_input = False
 
     try:
 
         # ====================================================
-        # OPCIÓN 1: ARCHIVO DIRECTO
+        # MODO 1:
+        # ARCHIVO DIRECTO DESDE N8N
         # ====================================================
 
-        uploaded_video = (
+        uploaded_file = (
             request.files.get("file")
             or
-            request.files.get("video")
-            or
             request.files.get("data")
+            or
+            request.files.get("video")
         )
 
-        if uploaded_video:
+        if uploaded_file:
 
-            temp_id = uuid.uuid4().hex
+            print(
+                "[WHISPER] Archivo recibido directamente "
+                "desde n8n."
+            )
+
+            original_name = (
+                uploaded_file.filename
+                or "input.mp4"
+            )
 
             extension = (
                 Path(
-                    uploaded_video.filename
-                    or "video.mp4"
+                    original_name
                 ).suffix.lower()
             )
 
@@ -902,27 +922,37 @@ def transcribe():
 
                 extension = ".mp4"
 
+            temp_id = uuid.uuid4().hex
+
             input_file = (
                 BASE /
                 f"transcribe_{temp_id}{extension}"
             )
 
-            uploaded_video.save(
+            uploaded_file.save(
                 input_file
             )
 
-            should_delete_input = True
+            if not input_file.exists():
+
+                raise RuntimeError(
+                    "El archivo de vídeo no se pudo guardar."
+                )
 
             print(
-                "[WHISPER] Archivo recibido "
-                "directamente por multipart."
+                "[WHISPER] Archivo guardado en:"
             )
 
-        else:
+            print(
+                str(input_file)
+            )
 
-            # =================================================
-            # OPCIÓN 2: URL
-            # =================================================
+        # ====================================================
+        # MODO 2:
+        # URL JSON
+        # ====================================================
+
+        else:
 
             data = request.get_json(
                 silent=True
@@ -940,6 +970,7 @@ def transcribe():
                     video_url
                 ).strip()
 
+                # Eliminar =
                 if video_url.startswith("="):
 
                     video_url = (
@@ -947,6 +978,7 @@ def transcribe():
                         .strip()
                     )
 
+                # Eliminar comillas
                 if (
                     len(video_url) >= 2
                     and
@@ -970,7 +1002,76 @@ def transcribe():
                         .strip()
                     )
 
-            if not video_url:
+                if not (
+                    video_url.startswith("http://")
+                    or
+                    video_url.startswith("https://")
+                ):
+
+                    raise ValueError(
+                        "video_url no es una URL "
+                        "HTTP/HTTPS válida: "
+                        + video_url
+                    )
+
+                print(
+                    "[WHISPER] Descargando vídeo "
+                    "desde URL:"
+                )
+
+                print(
+                    video_url
+                )
+
+                temp_id = uuid.uuid4().hex
+
+                input_file = (
+                    BASE /
+                    f"transcribe_{temp_id}.mp4"
+                )
+
+                download_result = subprocess.run(
+
+                    [
+
+                        "ffmpeg",
+
+                        "-y",
+
+                        "-threads",
+                        "1",
+
+                        "-i",
+                        video_url,
+
+                        "-c",
+                        "copy",
+
+                        str(input_file)
+                    ],
+
+                    stdout=subprocess.DEVNULL,
+
+                    stderr=subprocess.PIPE,
+
+                    text=True
+                )
+
+                if (
+                    download_result.returncode != 0
+                    or
+                    not input_file.exists()
+                ):
+
+                    raise RuntimeError(
+
+                        "No se pudo descargar "
+                        "el vídeo desde la URL:\n"
+                        +
+                        download_result.stderr[-4000:]
+                    )
+
+            else:
 
                 return jsonify(
 
@@ -983,113 +1084,19 @@ def transcribe():
 
                 ), 400
 
-            print(
-                "[WHISPER] Vídeo recibido por URL:"
-            )
-
-            print(
-                video_url
-            )
-
-            if not (
-                video_url.startswith("http://")
-                or
-                video_url.startswith("https://")
-            ):
-
-                raise ValueError(
-                    "video_url no es una URL HTTP/HTTPS válida: "
-                    + video_url
-                )
-
-            temp_id = uuid.uuid4().hex
-
-            input_file = (
-                BASE /
-                f"transcribe_{temp_id}.mp4"
-            )
-
-            # Descargar primero el vídeo.
-            # Esto evita que ffmpeg tenga problemas
-            # con URLs temporales.
-
-            print(
-                "[WHISPER] Descargando vídeo..."
-            )
-
-            download_result = subprocess.run(
-
-                [
-
-                    "ffmpeg",
-
-                    "-y",
-
-                    "-threads",
-                    "1",
-
-                    "-i",
-                    video_url,
-
-                    "-c",
-                    "copy",
-
-                    str(input_file)
-
-                ],
-
-                stdout=subprocess.DEVNULL,
-
-                stderr=subprocess.PIPE,
-
-                text=True
-            )
-
-            if download_result.returncode != 0:
-
-                raise RuntimeError(
-
-                    "No se pudo descargar el vídeo:\n"
-                    + download_result.stderr[-4000:]
-                )
-
-            should_delete_input = True
-
-        # ====================================================
-        # COMPROBAR ARCHIVO
-        # ====================================================
-
-        if not input_file.exists():
-
-            raise RuntimeError(
-                "El vídeo no existe después de recibirlo."
-            )
-
-        if input_file.stat().st_size <= 0:
-
-            raise RuntimeError(
-                "El archivo de vídeo está vacío."
-            )
-
-        print(
-            "[WHISPER] Vídeo preparado:"
-        )
-
-        print(
-            str(input_file)
-        )
-
         # ====================================================
         # EXTRAER AUDIO
         # ====================================================
 
-        audio_file = (
-            BASE /
-            f"audio_{uuid.uuid4().hex}.wav"
-        )
-
         print(
             "[WHISPER] Extrayendo audio..."
+        )
+
+        audio_id = uuid.uuid4().hex
+
+        audio_file = (
+            BASE /
+            f"transcribe_audio_{audio_id}.wav"
         )
 
         result = subprocess.run(
@@ -1121,7 +1128,6 @@ def transcribe():
                 "pcm_s16le",
 
                 str(audio_file)
-
             ],
 
             stdout=subprocess.DEVNULL,
@@ -1137,7 +1143,8 @@ def transcribe():
 
                 "No se pudo extraer el audio "
                 "del vídeo:\n"
-                + result.stderr[-4000:]
+                +
+                result.stderr[-4000:]
             )
 
         if not audio_file.exists():
@@ -1166,17 +1173,19 @@ def transcribe():
 
             language="es",
 
-            beam_size=1,
+            beam_size=5,
 
             word_timestamps=True,
 
             vad_filter=True,
 
-            condition_on_previous_text=False
+            condition_on_previous_text=True
         )
 
         output_segments = []
+
         output_words = []
+
         full_text = []
 
         for segment in segments:
@@ -1209,24 +1218,21 @@ def transcribe():
 
                     word_data = {
 
-                        "word":
-                            word_text,
+                        "word": word_text,
 
-                        "start":
-                            round(
-                                float(
-                                    word.start
-                                ),
-                                3
+                        "start": round(
+                            float(
+                                word.start
                             ),
+                            3
+                        ),
 
-                        "end":
-                            round(
-                                float(
-                                    word.end
-                                ),
-                                3
-                            )
+                        "end": round(
+                            float(
+                                word.end
+                            ),
+                            3
+                        )
                     }
 
                     segment_words.append(
@@ -1239,42 +1245,40 @@ def transcribe():
 
             output_segments.append({
 
-                "start":
-                    round(
-                        float(
-                            segment.start
-                        ),
-                        3
+                "start": round(
+                    float(
+                        segment.start
                     ),
+                    3
+                ),
 
-                "end":
-                    round(
-                        float(
-                            segment.end
-                        ),
-                        3
+                "end": round(
+                    float(
+                        segment.end
                     ),
+                    3
+                ),
 
-                "text":
-                    segment_text,
+                "text": segment_text,
 
-                "words":
-                    segment_words
+                "words": segment_words
             })
 
         # ====================================================
-        # LIMPIEZA
+        # LIMPIAR
         # ====================================================
 
         audio_file.unlink(
             missing_ok=True
         )
 
-        if should_delete_input:
+        input_file.unlink(
+            missing_ok=True
+        )
 
-            input_file.unlink(
-                missing_ok=True
-            )
+        # ====================================================
+        # INFORMACIÓN IDIOMA
+        # ====================================================
 
         detected_language = (
             info.language
@@ -1305,10 +1309,13 @@ def transcribe():
             "[WHISPER] Transcripción terminada."
         )
 
+        # ====================================================
+        # RESULTADO
+        # ====================================================
+
         return jsonify({
 
-            "ok":
-                True,
+            "ok": True,
 
             "language":
                 detected_language,
@@ -1577,7 +1584,7 @@ def audio_file(
 
 
 # ============================================================
-# ERROR 413
+# ERROR: ARCHIVO DEMASIADO GRANDE
 # ============================================================
 
 @app.errorhandler(413)
