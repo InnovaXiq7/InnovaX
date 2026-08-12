@@ -355,6 +355,51 @@ please contact us using the email above.
 <a href="terms.html">Terms of Service</a>
 
 </footer>
+<!-- Al final de index.html, justo antes de </body> -->
+  <script>
+    async function checkJobStatus(jobId, maxAttempts = 30) {
+      let attempts = 0;
+      let delay = 3000;
 
+      while (attempts < maxAttempts) {
+        try {
+          const response = await fetch(`/status/${jobId}`);
+
+          if (response.status === 404) {
+            throw new Error("La tarea no existe o ha caducado.");
+          }
+
+          if (!response.ok) {
+            throw new Error(`Error en el servidor: ${response.status}`);
+          }
+
+          const data = await response.json();
+
+          if (data.status === 'completed') {
+            console.log("Renderizado completado:", data.result_url);
+            return data.result_url;
+          }
+
+          if (data.status === 'failed') {
+            throw new Error(data.error || "El proceso de renderizado ha fallado.");
+          }
+
+        } catch (error) {
+          console.error("Deteniendo consulta de estado:", error.message);
+          alert(`Error en el proceso: ${error.message}`);
+          return null;
+        }
+
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay = Math.min(delay * 1.3, 10000);
+      }
+
+      alert("El proceso tardó demasiado tiempo. Por favor, vuelve a intentarlo.");
+      return null;
+    }
+  </script>
+</body>
+</html>
 </body>
 </html>
