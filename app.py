@@ -147,6 +147,10 @@ def generate_tts(text, voice, output_file):
 
 
 def make_caption_chunks(text):
+    """
+    Corta el texto en fragmentos dinámicos (1 a 2 palabras)
+    para subtítulos virales de lectura rápida.
+    """
     text = clean_text(text)
     if not text:
         return []
@@ -159,21 +163,9 @@ def make_caption_chunks(text):
 
     for word in words:
         current.append(word)
-        current_text = " ".join(current)
-        clean_current = re.sub(r"[^\wáéíóúüñÁÉÍÓÚÜÑ]", "", current_text)
-
         if len(current) >= 2:
-            if len(clean_current) >= 8:
-                chunks.append(" ".join(current))
-                current = []
-            else:
-                continue
-
-        elif len(current) == 1:
-            clean_word = re.sub(r"[^\wáéíóúüñÁÉÍÓÚÜÑ]", "", word)
-            if len(clean_word) >= 8:
-                chunks.append(word)
-                current = []
+            chunks.append(" ".join(current))
+            current = []
 
     if current:
         chunks.append(" ".join(current))
@@ -193,6 +185,8 @@ def create_ass_subtitles(text, duration, output_file):
     weights = [max(1, len(re.sub(r"\s+", "", chunk))) for chunk in chunks]
     total_weight = sum(weights)
 
+    # Estilo ASS optimizado para Shorts/TikTok:
+    # Fontsize=62, Bold, Outline=5, Shadow=2, Alignment=5 (Centro absoluto)
     ass = [
         "[Script Info]\n",
         "ScriptType: v4.00+\n",
@@ -203,7 +197,7 @@ def create_ass_subtitles(text, duration, output_file):
         "Collisions: Normal\n\n",
         "[V4+ Styles]\n",
         "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n",
-        "Style: TikTok,DejaVu Sans,48,&H00FFFFFF,&H00000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,5,0,0,0,1\n\n",
+        "Style: TikTok,DejaVu Sans,62,&H00FFFFFF,&H00000000,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,5,0,0,0,1\n\n",
         "[Events]\n",
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     ]
@@ -216,10 +210,19 @@ def create_ass_subtitles(text, duration, output_file):
         start = current_time
         end = current_time + chunk_duration
 
-        if (end - start) < 0.35:
-            end = start + 0.35
+        if (end - start) < 0.25:
+            end = start + 0.25
 
-        ass_text = r"{\an5\pos(360,850)}" + chunk.replace("{", r"\{").replace("}", r"\}")
+        words = chunk.split()
+        if len(words) > 1:
+            # Primera palabra en Amarillo Neón (&H0000FFFF) y resto en Blanco (&H00FFFFFF)
+            formatted_text = f"{{\\c&H0000FFFF&}}{words[0]} {{\\c&H00FFFFFF&}}{' '.join(words[1:])}"
+        else:
+            formatted_text = f"{{\\c&H0000FFFF&}}{chunk}"
+
+        # Posicionado en el centro de la pantalla (360, 640)
+        ass_text = r"{\an5\pos(360,640)}" + formatted_text.replace("{", r"\{").replace("}", r"\}")
+
         ass.append(
             f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(min(end, duration))},TikTok,,0,0,0,,{ass_text}\n"
         )
@@ -267,7 +270,7 @@ def run_job(job_id, scenes):
                     voice_audio = job_dir / f"voice_{i}.mp3"
                     generate_tts(subtitle, voice, voice_audio)
 
-                # Si hay voz, la duración se adapta al audio
+                # Adaptar duración a la voz en off
                 if voice_audio and voice_audio.exists():
                     audio_dur = get_audio_duration(voice_audio)
                     if audio_dur:
@@ -278,7 +281,7 @@ def run_job(job_id, scenes):
                     bg_audio = job_dir / f"bg_{i}.m4a"
                     download_audio(bg_music_url, bg_audio)
 
-                # 3. SUBTÍTULOS
+                # 3. SUBTÍTULOS ESTILO TIKTOK
                 has_subtitles = False
                 if subtitle:
                     has_subtitles = create_ass_subtitles(subtitle, duration, ass_file)
@@ -342,7 +345,7 @@ def run_job(job_id, scenes):
 
                 inputs.append(scene_video)
 
-                # Limpieza de temporales
+                # Limpieza de temporales por escena
                 if voice_audio and voice_audio.exists():
                     voice_audio.unlink(missing_ok=True)
                 if bg_audio and bg_audio.exists():
@@ -389,11 +392,11 @@ def run_job(job_id, scenes):
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=8, mixing=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=9, mixing=True, tiktok_subs=True)
 
 @app.get("/")
 def root():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=8, mixing=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=9, mixing=True, tiktok_subs=True)
 
 @app.post("/tts")
 def tts():
