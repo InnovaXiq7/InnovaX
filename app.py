@@ -34,7 +34,6 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================
 
 JOBS = {}
-
 RENDER_LOCK = threading.Lock()
 
 
@@ -63,9 +62,7 @@ def public_url(path):
 def safe_float(value, default=7.0):
     try:
         value = float(value)
-        if not value > 0:
-            return default
-        return value
+        return value if value > 0 else default
     except Exception:
         return default
 
@@ -101,11 +98,9 @@ def clean_text(text):
 
 
 def get_audio_duration(file_path):
-    """Obtiene la duración exacta de un archivo de audio en segundos mediante ffprobe."""
     try:
         cmd = [
-            "ffprobe",
-            "-v", "error",
+            "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(file_path)
@@ -118,52 +113,31 @@ def get_audio_duration(file_path):
     return None
 
 
-# ============================================================
-# LIMPIAR JOB
-# ============================================================
-
 def clean_job(job_id):
     job_dir = BASE / job_id
     if job_dir.exists():
         shutil.rmtree(job_dir, ignore_errors=True)
 
 
-# ============================================================
-# DESCARGAR AUDIO
-# ============================================================
-
 def download_audio(url, output_file):
     result = subprocess.run(
         [
-            "ffmpeg",
-            "-y",
-            "-threads", "1",
-            "-i", url,
-            "-vn",
-            "-c:a", "aac",
-            "-b:a", "128k",
+            "ffmpeg", "-y", "-threads", "1",
+            "-i", url, "-vn",
+            "-c:a", "aac", "-b:a", "128k",
             str(output_file)
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True
     )
-
     if result.returncode != 0:
         raise RuntimeError("Error descargando audio:\n" + result.stderr[-4000:])
 
 
-# ============================================================
-# TTS
-# ============================================================
-
 async def generate_tts_async(text, voice, output_file):
     communicate = edge_tts.Communicate(
-        text=text,
-        voice=voice,
-        rate="+0%",
-        volume="+0%",
-        pitch="+0Hz"
+        text=text, voice=voice, rate="+0%", volume="+0%", pitch="+0Hz"
     )
     await communicate.save(str(output_file))
 
@@ -172,15 +146,10 @@ def generate_tts(text, voice, output_file):
     asyncio.run(generate_tts_async(text, voice, output_file))
 
 
-# ============================================================
-# CREAR BLOQUES DE SUBTITULOS
-# ============================================================
-
 def make_caption_chunks(text):
     text = clean_text(text)
     if not text:
         return []
-
     words = text.split()
     if not words:
         return []
@@ -211,10 +180,6 @@ def make_caption_chunks(text):
 
     return chunks
 
-
-# ============================================================
-# CREAR SUBTITULOS ASS
-# ============================================================
 
 def create_ass_subtitles(text, duration, output_file):
     text = clean_text(text)
@@ -248,7 +213,6 @@ def create_ass_subtitles(text, duration, output_file):
     for index, chunk in enumerate(chunks):
         portion = weights[index] / total_weight
         chunk_duration = duration * portion
-
         start = current_time
         end = current_time + chunk_duration
 
@@ -256,11 +220,9 @@ def create_ass_subtitles(text, duration, output_file):
             end = start + 0.35
 
         ass_text = r"{\an5\pos(360,850)}" + chunk.replace("{", r"\{").replace("}", r"\}")
-
         ass.append(
             f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(min(end, duration))},TikTok,,0,0,0,,{ass_text}\n"
         )
-
         current_time = end
 
     output_file.write_text("".join(ass), encoding="utf-8")
@@ -268,7 +230,7 @@ def create_ass_subtitles(text, duration, output_file):
 
 
 # ============================================================
-# RENDER DE ESCENAS
+# RENDER DE ESCENAS CON MEZCLA DE AUDIO
 # ============================================================
 
 def run_job(job_id, scenes):
@@ -287,149 +249,137 @@ def run_job(job_id, scenes):
                     raise ValueError(f"La escena {i + 1} no tiene video_url.")
 
                 audio_url = scene.get("audio_url") or scene.get("audio_src")
+                bg_music_url = scene.get("bg_music_url") or scene.get("bg_audio_url")
                 subtitle = clean_text(scene.get("subtitle") or scene.get("voiceover") or scene.get("text") or "")
                 voice = scene.get("voice", "es-ES-AlvaroNeural")
                 duration = safe_float(scene.get("duration", 7), 7)
 
                 scene_video = job_dir / f"scene_{i}.mp4"
-                scene_audio = None
+                voice_audio = None
+                bg_audio = None
                 ass_file = job_dir / f"subtitle_{i}.ass"
 
-                # 1. AUDIO (Descarga o Generación Automática vía TTS)
+                # 1. AUDIO DE VOZ / LOCUCIÓN (audio_url o TTS automático)
                 if audio_url:
-                    scene_audio = job_dir / f"audio_{i}.m4a"
-                    download_audio(audio_url, scene_audio)
+                    voice_audio = job_dir / f"voice_{i}.m4a"
+                    download_audio(audio_url, voice_audio)
                 elif subtitle:
-                    # Generar TTS automáticamente si hay texto y no hay audio manual
-                    scene_audio = job_dir / f"audio_{i}.mp3"
-                    generate_tts(subtitle, voice, scene_audio)
+                    voice_audio = job_dir / f"voice_{i}.mp3"
+                    generate_tts(subtitle, voice, voice_audio)
 
-                # Ajustar duración dinámicamente si se generó/descargó audio
-                if scene_audio and scene_audio.exists():
-                    audio_dur = get_audio_duration(scene_audio)
+                # Si hay voz, la duración se adapta al audio
+                if voice_audio and voice_audio.exists():
+                    audio_dur = get_audio_duration(voice_audio)
                     if audio_dur:
                         duration = audio_dur
 
-                # 2. SUBTÍTULOS ASS
+                # 2. MÚSICA DE FONDO (bg_music_url)
+                if bg_music_url:
+                    bg_audio = job_dir / f"bg_{i}.m4a"
+                    download_audio(bg_music_url, bg_audio)
+
+                # 3. SUBTÍTULOS
                 has_subtitles = False
                 if subtitle:
                     has_subtitles = create_ass_subtitles(subtitle, duration, ass_file)
 
-                # 3. FILTRO VÍDEO
-                video_filter = (
-                    "scale=720:1280:force_original_aspect_ratio=increase,"
-                    "crop=720:1280,"
-                    "fps=30"
-                )
-
+                # 4. FILTROS Y COMANDO FFMPEG
+                video_filter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30"
                 if has_subtitles:
-                    # Escapar ruta para el filtro de subtítulos de FFmpeg
                     ass_path = ass_file.as_posix().replace(":", r"\:").replace("'", r"\'")
                     video_filter += f",subtitles='{ass_path}'"
 
-                # 4. COMANDO FFMPEG
-                if scene_audio and scene_audio.exists():
-                    command = [
-                        "ffmpeg", "-y",
-                        "-threads", "1",
-                        "-i", src,
-                        "-i", str(scene_audio),
+                cmd = ["ffmpeg", "-y", "-threads", "1", "-i", src]
+
+                # Construir las entradas y filtros de audio
+                if voice_audio and voice_audio.exists() and bg_audio and bg_audio.exists():
+                    cmd.extend(["-i", str(voice_audio), "-i", str(bg_audio)])
+                    filter_complex = (
+                        f"[0:v]{video_filter}[v];"
+                        f"[1:a]volume=1.0[v_voice];"
+                        f"[2:a]volume=0.20[v_bg];"
+                        f"[v_voice][v_bg]amix=inputs=2:duration=first:dropout_transition=2[a]"
+                    )
+                    cmd.extend([
+                        "-t", str(duration),
+                        "-filter_complex", filter_complex,
+                        "-map", "[v]", "-map", "[a]"
+                    ])
+
+                elif voice_audio and voice_audio.exists():
+                    cmd.extend(["-i", str(voice_audio)])
+                    cmd.extend([
                         "-t", str(duration),
                         "-vf", video_filter,
-                        "-map", "0:v:0",
-                        "-map", "1:a:0",
-                        "-c:v", "libx264",
-                        "-preset", "ultrafast",
-                        "-crf", "28",
-                        "-pix_fmt", "yuv420p",
-                        "-c:a", "aac",
-                        "-b:a", "128k",
-                        "-shortest",
-                        "-movflags", "+faststart",
-                        str(scene_video)
-                    ]
+                        "-map", "0:v:0", "-map", "1:a:0"
+                    ])
+
+                elif bg_audio and bg_audio.exists():
+                    cmd.extend(["-i", str(bg_audio)])
+                    filter_complex = f"[0:v]{video_filter}[v];[1:a]volume=0.20[a]"
+                    cmd.extend([
+                        "-t", str(duration),
+                        "-filter_complex", filter_complex,
+                        "-map", "[v]", "-map", "[a]"
+                    ])
+
                 else:
-                    command = [
-                        "ffmpeg", "-y",
-                        "-threads", "1",
-                        "-i", src,
+                    cmd.extend([
                         "-t", str(duration),
                         "-vf", video_filter,
-                        "-c:v", "libx264",
-                        "-preset", "ultrafast",
-                        "-crf", "28",
-                        "-pix_fmt", "yuv420p",
-                        "-an",
-                        "-movflags", "+faststart",
-                        str(scene_video)
-                    ]
+                        "-an"
+                    ])
 
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
+                cmd.extend([
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    "-movflags", "+faststart", str(scene_video)
+                ])
 
+                result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                 if result.returncode != 0:
                     raise RuntimeError(f"Error renderizando escena {i + 1}:\n" + result.stderr[-5000:])
 
                 inputs.append(scene_video)
 
-                # Limpieza de temporales de la escena
-                if scene_audio and scene_audio.exists():
-                    scene_audio.unlink(missing_ok=True)
-
+                # Limpieza de temporales
+                if voice_audio and voice_audio.exists():
+                    voice_audio.unlink(missing_ok=True)
+                if bg_audio and bg_audio.exists():
+                    bg_audio.unlink(missing_ok=True)
                 if ass_file.exists():
                     ass_file.unlink(missing_ok=True)
 
-            # ====================================================
-            # CONCATENAR ESCENAS
-            # ====================================================
+            # CONCATENACIÓN
             concat_file = job_dir / "concat.txt"
             concat_lines = [f"file '{v.as_posix()}'\n" for v in inputs]
             concat_file.write_text("".join(concat_lines), encoding="utf-8")
 
             final_file = job_dir / "final.mp4"
-
             concat_command = [
-                "ffmpeg", "-y",
-                "-threads", "1",
-                "-f", "concat",
-                "-safe", "0",
+                "ffmpeg", "-y", "-threads", "1",
+                "-f", "concat", "-safe", "0",
                 "-i", str(concat_file),
-                "-c", "copy",
-                "-movflags", "+faststart",
+                "-c", "copy", "-movflags", "+faststart",
                 str(final_file)
             ]
 
-            result = subprocess.run(
-                concat_command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-
+            result = subprocess.run(concat_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0:
-                raise RuntimeError("Error concatenando las escenas:\n" + result.stderr[-5000:])
+                raise RuntimeError("Error concatenando escenas:\n" + result.stderr[-5000:])
 
-            # COMPLETADO
             JOBS[job_id].update(
                 status="succeeded",
                 url=public_url(f"/files/{job_id}/final.mp4"),
                 local_url=f"/files/{job_id}/final.mp4"
             )
 
-            # Limpieza final de escenas intermedias
             for video_file in inputs:
                 video_file.unlink(missing_ok=True)
             concat_file.unlink(missing_ok=True)
 
         except Exception as e:
-            JOBS[job_id].update(
-                status="failed",
-                error=str(e)
-            )
+            JOBS[job_id].update(status="failed", error=str(e))
             clean_job(job_id)
 
 
@@ -439,26 +389,11 @@ def run_job(job_id, scenes):
 
 @app.get("/health")
 def health():
-    return jsonify(
-        ok=True,
-        service="n8n-free-ffmpeg-renderer",
-        version=7,
-        tts="edge-tts",
-        subtitles=True,
-        subtitle_style="tiktok-word-captions"
-    )
-
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=8, mixing=True)
 
 @app.get("/")
 def root():
-    return jsonify(
-        ok=True,
-        service="n8n-free-ffmpeg-renderer",
-        version=7,
-        tts="edge-tts",
-        subtitles=True
-    )
-
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=8, mixing=True)
 
 @app.post("/tts")
 def tts():
@@ -475,48 +410,11 @@ def tts():
         output_file = AUDIO_DIR / filename
 
         generate_tts(text, voice, output_file)
-
-        if not output_file.exists():
-            raise RuntimeError("TTS no creó el archivo de audio.")
-
         path = f"/files/audio/{filename}"
 
-        return jsonify(
-            id=audio_id,
-            voice=voice,
-            url=path,
-            public_url=public_url(path)
-        )
-
+        return jsonify(id=audio_id, voice=voice, url=path, public_url=public_url(path))
     except Exception as e:
         return jsonify(error=str(e)), 500
-
-
-@app.post("/upload-audio")
-def upload_audio():
-    try:
-        audio = request.files.get("file") or request.files.get("data")
-
-        if not audio:
-            return jsonify(error="No audio file supplied. Usa el campo multipart 'file' o 'data'."), 400
-
-        audio_id = uuid.uuid4().hex
-        filename = f"{audio_id}.mp3"
-        output_file = AUDIO_DIR / filename
-
-        audio.save(output_file)
-
-        path = f"/files/audio/{filename}"
-
-        return jsonify(
-            id=audio_id,
-            url=path,
-            public_url=public_url(path)
-        )
-
-    except Exception as e:
-        return jsonify(error=str(e)), 500
-
 
 @app.post("/render")
 def render():
@@ -524,83 +422,44 @@ def render():
     scenes = data.get("scenes")
 
     if not isinstance(scenes, list) or len(scenes) < 1:
-        return jsonify(
-            error="El campo scenes debe ser una lista con al menos una escena.",
-            id=None,
-            status="failed",
-            url=None
-        ), 400
+        return jsonify(error="scenes debe ser una lista válida.", id=None, status="failed"), 400
 
     job_id = uuid.uuid4().hex
-
-    JOBS[job_id] = {
-        "id": job_id,
-        "status": "queued",
-        "url": None,
-        "error": None
-    }
+    JOBS[job_id] = {"id": job_id, "status": "queued", "url": None, "error": None}
 
     normalized = []
-
     for index, scene in enumerate(scenes):
         if not isinstance(scene, dict):
             continue
 
-        src = scene.get("video_url") or scene.get("src") or scene.get("video_src")
-        audio_url = scene.get("audio_url") or scene.get("audio_src")
-        subtitle = scene.get("subtitle") or scene.get("voiceover") or scene.get("text") or ""
-        voice = scene.get("voice", "es-ES-AlvaroNeural")
-        duration = safe_float(scene.get("duration", 7), 7)
-
         normalized.append({
             "index": index,
-            "video_url": src,
-            "audio_url": audio_url,
-            "subtitle": subtitle,
-            "voice": voice,
-            "duration": duration
+            "video_url": scene.get("video_url") or scene.get("src") or scene.get("video_src"),
+            "audio_url": scene.get("audio_url") or scene.get("audio_src"),
+            "bg_music_url": scene.get("bg_music_url") or scene.get("bg_audio_url"),
+            "subtitle": scene.get("subtitle") or scene.get("voiceover") or scene.get("text") or "",
+            "voice": scene.get("voice", "es-ES-AlvaroNeural"),
+            "duration": safe_float(scene.get("duration", 7), 7)
         })
 
-    if not normalized:
-        JOBS[job_id].update(
-            status="failed",
-            error="No hay escenas válidas."
-        )
-        return jsonify(JOBS[job_id]), 400
-
-    threading.Thread(
-        target=run_job,
-        args=(job_id, normalized),
-        daemon=True
-    ).start()
-
+    threading.Thread(target=run_job, args=(job_id, normalized), daemon=True).start()
     return jsonify(JOBS[job_id])
-
 
 @app.get("/status/<job_id>")
 def status(job_id):
     job = JOBS.get(job_id)
-
     if not job:
         return jsonify(error="No existe un render con ese ID."), 404
-
     return jsonify(job)
-
 
 @app.get("/files/<job_id>/<filename>")
 def render_file(job_id, filename):
     return send_from_directory(BASE / job_id, filename, as_attachment=False)
 
-
 @app.get("/files/audio/<filename>")
 def audio_file(filename):
     return send_from_directory(AUDIO_DIR, filename, as_attachment=False)
 
-
-# ============================================================
-# START
-# ============================================================
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
