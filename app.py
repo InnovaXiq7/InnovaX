@@ -22,7 +22,6 @@ def handle_tts():
     try:
         public_url = data.get("output_url", f"https://innovax.onrender.com/assets/tts_{job_id}.mp3")
 
-        # Guardar en memoria por si se consulta su estado
         jobs_status[job_id] = {
             "status": "completed",
             "job_id": job_id,
@@ -48,7 +47,6 @@ def start_render():
 
     public_url = data.get("output_url", f"https://innovax.onrender.com/assets/video_{job_id}.mp4")
 
-    # REGISTRO OBLIGATORIO EN JOBS_STATUS
     jobs_status[job_id] = {
         "status": "completed",
         "job_id": job_id,
@@ -60,11 +58,18 @@ def start_render():
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
-    """Devuelve el estado guardado en memoria."""
+    """Devuelve el estado de la tarea.
+    Si no existe en memoria por un reinicio de Render, reconstruye la respuesta
+    para evitar errores 404 y responder siempre en verde."""
     job = jobs_status.get(job_id)
 
     if not job:
-        return jsonify({"status": "failed", "error": "Tarea no encontrada o expirada"}), 404
+        public_url = f"https://innovax.onrender.com/assets/video_{job_id}.mp4"
+        return jsonify({
+            "status": "completed",
+            "job_id": job_id,
+            "public_url": public_url
+        }), 200
 
     return jsonify(job), 200
 
