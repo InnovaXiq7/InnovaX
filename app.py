@@ -147,10 +147,6 @@ def generate_tts(text, voice, output_file):
 
 
 def make_caption_chunks(text):
-    """
-    Corta el texto en fragmentos dinámicos (1 a 2 palabras)
-    para subtítulos virales de lectura rápida.
-    """
     text = clean_text(text)
     if not text:
         return []
@@ -185,19 +181,17 @@ def create_ass_subtitles(text, duration, output_file):
     weights = [max(1, len(re.sub(r"\s+", "", chunk))) for chunk in chunks]
     total_weight = sum(weights)
 
-    # Estilo ASS optimizado para Shorts/TikTok:
-    # Fontsize=62, Bold, Outline=5, Shadow=2, Alignment=5 (Centro absoluto)
     ass = [
         "[Script Info]\n",
         "ScriptType: v4.00+\n",
         "PlayResX: 720\n",
         "PlayResY: 1280\n",
         "ScaledBorderAndShadow: yes\n",
-        "WrapStyle: 2\n",
+        "WrapStyle: 0\n",
         "Collisions: Normal\n\n",
         "[V4+ Styles]\n",
         "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n",
-        "Style: TikTok,DejaVu Sans,62,&H00FFFFFF,&H00000000,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,5,0,0,0,1\n\n",
+        "Style: TikTok,DejaVu Sans,52,&H00FFFFFF,&H00000000,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,5,40,40,0,1\n\n",
         "[Events]\n",
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     ]
@@ -215,13 +209,11 @@ def create_ass_subtitles(text, duration, output_file):
 
         words = chunk.split()
         if len(words) > 1:
-            # Primera palabra en Amarillo Neón (&H0000FFFF) y resto en Blanco (&H00FFFFFF)
             formatted_text = f"{{\\c&H0000FFFF&}}{words[0]} {{\\c&H00FFFFFF&}}{' '.join(words[1:])}"
         else:
             formatted_text = f"{{\\c&H0000FFFF&}}{chunk}"
 
-        # Posicionado en el centro de la pantalla (360, 640)
-        ass_text = r"{\an5\pos(360,640)}" + formatted_text.replace("{", r"\{").replace("}", r"\}")
+        ass_text = r"{\an5\pos(360,640)}" + formatted_text
 
         ass.append(
             f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(min(end, duration))},TikTok,,0,0,0,,{ass_text}\n"
@@ -233,7 +225,7 @@ def create_ass_subtitles(text, duration, output_file):
 
 
 # ============================================================
-# RENDER DE ESCENAS CON MEZCLA DE AUDIO
+# RENDER DE ESCENAS CON ZOOM DINÁMICO + MEZCLA DE AUDIO
 # ============================================================
 
 def run_job(job_id, scenes):
@@ -262,7 +254,7 @@ def run_job(job_id, scenes):
                 bg_audio = None
                 ass_file = job_dir / f"subtitle_{i}.ass"
 
-                # 1. AUDIO DE VOZ / LOCUCIÓN (audio_url o TTS automático)
+                # 1. AUDIO DE VOZ / LOCUCIÓN
                 if audio_url:
                     voice_audio = job_dir / f"voice_{i}.m4a"
                     download_audio(audio_url, voice_audio)
@@ -270,13 +262,12 @@ def run_job(job_id, scenes):
                     voice_audio = job_dir / f"voice_{i}.mp3"
                     generate_tts(subtitle, voice, voice_audio)
 
-                # Adaptar duración a la voz en off
                 if voice_audio and voice_audio.exists():
                     audio_dur = get_audio_duration(voice_audio)
                     if audio_dur:
                         duration = audio_dur
 
-                # 2. MÚSICA DE FONDO (bg_music_url)
+                # 2. MÚSICA DE FONDO
                 if bg_music_url:
                     bg_audio = job_dir / f"bg_{i}.m4a"
                     download_audio(bg_music_url, bg_audio)
@@ -286,8 +277,13 @@ def run_job(job_id, scenes):
                 if subtitle:
                     has_subtitles = create_ass_subtitles(subtitle, duration, ass_file)
 
-                # 4. FILTROS Y COMANDO FFMPEG
-                video_filter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30"
+                # 4. FILTROS DE VÍDEO (ESCALADO + ZOOM DINÁMICO KEN BURNS + SUBTÍTULOS)
+                video_filter = (
+                    "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
+                    "zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280,"
+                    "fps=30"
+                )
+
                 if has_subtitles:
                     ass_path = ass_file.as_posix().replace(":", r"\:").replace("'", r"\'")
                     video_filter += f",subtitles='{ass_path}'"
@@ -392,11 +388,11 @@ def run_job(job_id, scenes):
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=9, mixing=True, tiktok_subs=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=11, sub_fix=True)
 
 @app.get("/")
 def root():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=9, mixing=True, tiktok_subs=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=11, sub_fix=True)
 
 @app.post("/tts")
 def tts():
