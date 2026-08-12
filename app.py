@@ -35,19 +35,16 @@ def index():
 
 @app.route('/assets/<path:filename>', methods=['GET'])
 def serve_assets(filename):
-    # 1. Buscar primero en ASSETS_DIR (/assets)
     local_asset_path = os.path.join(ASSETS_DIR, filename)
     if os.path.exists(local_asset_path) and os.path.getsize(local_asset_path) > 0:
         mimetype = 'video/mp4' if filename.endswith('.mp4') else ('audio/mpeg' if filename.endswith('.mp3') else None)
         return send_file(local_asset_path, mimetype=mimetype)
 
-    # 2. Buscar en TEMP_DIR
     temp_file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
         mimetype = 'video/mp4' if filename.endswith('.mp4') else ('audio/mpeg' if filename.endswith('.mp3') else None)
         return send_file(temp_file_path, mimetype=mimetype)
 
-    # 3. Fallback solo para peticiones de vídeo .mp4
     if filename.endswith('.mp4'):
         fallback_path = os.path.join(TEMP_DIR, f"fallback_{filename}")
         if not os.path.exists(fallback_path):
@@ -65,8 +62,7 @@ def handle_tts():
         filename = f"tts_{job_id}.mp3"
         file_path = os.path.join(ASSETS_DIR, filename)
 
-        # Si viene un buffer/audio en el request o requiere generación
-        # Generamos un archivo MP3 base en ASSETS_DIR para garantizar que exista
+        # Generar un archivo estático de prueba para asegurar respuesta válida
         cmd = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
@@ -111,62 +107,89 @@ def render_worker(job_id, data, output_filename, output_path):
             valid_clip_files = []
 
             for idx, scene in enumerate(scenes):
-                video_url = scene.get("video_url")
-                audio_url = scene.get("audio_url")
+                video_url = scene.get("video_url", "")
+                audio_url = scene.get("audio_url", "")
+                scene_duration = str(scene.get("duration", 5))
 
-                # Detectar si la URL es una imagen (.jpg, .png, pollinations)
-                is_image = any(ext in video_url.lower() for ext in ['.jpg', '.png', '.jpeg', 'pollinations'])
+                is_image = any(ext in video_url.lower() for ext in ['.jpg', '.png', '.jpeg', 'pollinations']) or not video_url.endswith('.mp4')
                 file_ext = ".jpg" if is_image else ".mp4"
 
                 raw_v = os.path.join(TEMP_DIR, f"{job_id}_raw_v_{idx}{file_ext}")
                 raw_a = os.path.join(TEMP_DIR, f"{job_id}_raw_a_{idx}.mp3")
                 clip_out = os.path.join(TEMP_DIR, f"{job_id}_clip_{idx}.mp4")
 
-                if video_url and audio_url:
+                if video_url:
                     try:
                         download_file(video_url, raw_v)
-                        download_file(audio_url, raw_a)
+
+                        has_audio = False
+                        if audio_url:
+                            try:
+                                download_file(audio_url, raw_a)
+                                if os.path.exists(raw_a) and os.path.getsize(raw_a) > 0:
+                                    has_audio = True
+                            except Exception as a_err:
+                                print(f"[Aviso]: No se pudo descargar audio para escena {idx}: {a_err}")
 
                         if is_image:
-                            # Convierte la imagen IA en un clip de vídeo con efecto Zoom-In suave (Ken Burns)
-                            clip_cmd = [
-                                'ffmpeg', '-y',
-                                '-threads', '2',
-                                '-loop', '1',
-                                '-i', raw_v,
-                                '-i', raw_a,
-                                '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.0015,1.15)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
-                                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-                                '-c:a', 'aac', '-b:a', '128k',
-                                '-shortest',
-                                clip_out
-                            ]
+                            # Procesamiento directo y compatible para imágenes verticales en FFmpeg
+                            if has_audio:
+                                clip_cmd = [
+                                    'ffmpeg', '-y', '-threads', '2',
+                                    '-loop', '1', '-i', raw_v,
+                                    '-i', raw_a,
+                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p",
+                                    '-c:v', 'libx264', '-preset', 'ultrafast',
+                                    '-c:a', 'aac', '-b:a', '128k',
+                                    '-shortest',
+                                    clip_out
+                                ]
+                            else:
+                                clip_cmd = [
+                                    'ffmpeg', '-y', '-threads', '2',
+                                    '-loop', '1', '-i', raw_v,
+                                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                                    '-t', scene_duration,
+                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p",
+                                    '-c:v', 'libx264', '-preset', 'ultrafast',
+                                    '-c:a', 'aac', '-b:a', '128k',
+                                    clip_out
+                                ]
                         else:
-                            # Caso vídeo mp4 estándar
-                            clip_cmd = [
-                                'ffmpeg', '-y',
-                                '-threads', '2',
-                                '-i', raw_v,
-                                '-i', raw_a,
-                                '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1",
-                                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-                                '-c:a', 'aac', '-b:a', '128k',
-                                '-shortest',
-                                clip_out
-                            ]
+                            # Clip de vídeo estándar
+                            if has_audio:
+                                clip_cmd = [
+                                    'ffmpeg', '-y', '-threads', '2',
+                                    '-i', raw_v, '-i', raw_a,
+                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p",
+                                    '-c:v', 'libx264', '-preset', 'ultrafast',
+                                    '-c:a', 'aac', '-b:a', '128k',
+                                    '-shortest',
+                                    clip_out
+                                ]
+                            else:
+                                clip_cmd = [
+                                    'ffmpeg', '-y', '-threads', '2',
+                                    '-i', raw_v,
+                                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                                    '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p",
+                                    '-c:v', 'libx264', '-preset', 'ultrafast',
+                                    '-c:a', 'aac', '-b:a', '128k',
+                                    clip_out
+                                ]
 
                         res = subprocess.run(clip_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
                         if os.path.exists(raw_v): os.remove(raw_v)
                         if os.path.exists(raw_a): os.remove(raw_a)
 
-                        if res.returncode == 0:
+                        if res.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
                             valid_clip_files.append(clip_out)
                         else:
-                            print(f"[FFmpeg Error]: {res.stderr}")
+                            print(f"[FFmpeg Error Escena {idx}]: {res.stderr}")
 
                     except Exception as clip_err:
-                        print(f"[Error procesando escena {idx}]: {str(clip_err)}")
+                        print(f"[Error en escena {idx}]: {str(clip_err)}")
 
             if valid_clip_files:
                 concat_list_path = os.path.join(TEMP_DIR, f"{job_id}_concat.txt")
@@ -175,8 +198,7 @@ def render_worker(job_id, data, output_filename, output_path):
                         f.write(f"file '{clip}'\n")
 
                 concat_cmd = [
-                    'ffmpeg', '-y',
-                    '-threads', '2',
+                    'ffmpeg', '-y', '-threads', '2',
                     '-f', 'concat', '-safe', '0',
                     '-i', concat_list_path,
                     '-c', 'copy',
@@ -192,10 +214,10 @@ def render_worker(job_id, data, output_filename, output_path):
                 build_fallback_video(output_path)
 
         except Exception as e:
-            print(f"[ERROR]: {str(e)}")
+            print(f"[ERROR GLOBAL RENDER]: {str(e)}")
             build_fallback_video(output_path)
 
-        if not os.path.exists(output_path):
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             build_fallback_video(output_path)
 
         gc.collect()
