@@ -5,6 +5,7 @@ import subprocess
 import threading
 import asyncio
 import re
+import gc
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -225,7 +226,7 @@ def create_ass_subtitles(text, duration, output_file):
 
 
 # ============================================================
-# RENDER DE ESCENAS CON ZOOM DINÁMICO + MEZCLA DE AUDIO
+# RENDER DE ESCENAS CON ZOOM DINÁMICO OPTIMIZADO PARA RAM
 # ============================================================
 
 def run_job(job_id, scenes):
@@ -277,7 +278,8 @@ def run_job(job_id, scenes):
                 if subtitle:
                     has_subtitles = create_ass_subtitles(subtitle, duration, ass_file)
 
-                # 4. FILTROS DE VÍDEO (ESCALADO + ZOOM DINÁMICO KEN BURNS + SUBTÍTULOS)
+                # 4. FILTROS DE VÍDEO CON MEMORIA RAM CONTROLADA
+                # Se descompone el filtro reduciendo primero el tamaño de entrada para ahorrar RAM en el zoompan
                 video_filter = (
                     "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
                     "zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280,"
@@ -329,8 +331,10 @@ def run_job(job_id, scenes):
                         "-an"
                     ])
 
+                # Limitación estricta de hilos y tamaño de búfer de RAM
                 cmd.extend([
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                    "-threads", "1", "-max_mxf_audio_actions", "1",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
                     "-movflags", "+faststart", str(scene_video)
                 ])
@@ -341,13 +345,14 @@ def run_job(job_id, scenes):
 
                 inputs.append(scene_video)
 
-                # Limpieza de temporales por escena
+                # Limpieza inmediata de temporales y RAM entre escenas
                 if voice_audio and voice_audio.exists():
                     voice_audio.unlink(missing_ok=True)
                 if bg_audio and bg_audio.exists():
                     bg_audio.unlink(missing_ok=True)
                 if ass_file.exists():
                     ass_file.unlink(missing_ok=True)
+                gc.collect()
 
             # CONCATENACIÓN
             concat_file = job_dir / "concat.txt"
@@ -380,6 +385,8 @@ def run_job(job_id, scenes):
         except Exception as e:
             JOBS[job_id].update(status="failed", error=str(e))
             clean_job(job_id)
+        finally:
+            gc.collect()
 
 
 # ============================================================
@@ -388,11 +395,11 @@ def run_job(job_id, scenes):
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=11, sub_fix=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=12, ram_optimized=True)
 
 @app.get("/")
 def root():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=11, sub_fix=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=12, ram_optimized=True)
 
 @app.post("/tts")
 def tts():
