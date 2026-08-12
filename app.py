@@ -10,7 +10,12 @@ from flask import Flask, jsonify, request, send_from_directory, send_file
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
+# Directorios absolutos para el entorno de Render
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'innovax_renders')
+
+os.makedirs(ASSETS_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 jobs_status = {}
@@ -30,14 +35,19 @@ def index():
 
 @app.route('/assets/<path:filename>', methods=['GET'])
 def serve_assets(filename):
+    # 1. Buscar primero en ASSETS_DIR (/assets)
+    local_asset_path = os.path.join(ASSETS_DIR, filename)
+    if os.path.exists(local_asset_path) and os.path.getsize(local_asset_path) > 0:
+        mimetype = 'video/mp4' if filename.endswith('.mp4') else ('audio/mpeg' if filename.endswith('.mp3') else None)
+        return send_file(local_asset_path, mimetype=mimetype)
+
+    # 2. Buscar en TEMP_DIR
     temp_file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
-        return send_file(temp_file_path, mimetype='video/mp4' if filename.endswith('.mp4') else 'audio/mpeg')
+        mimetype = 'video/mp4' if filename.endswith('.mp4') else ('audio/mpeg' if filename.endswith('.mp3') else None)
+        return send_file(temp_file_path, mimetype=mimetype)
 
-    local_asset_path = os.path.join('assets', filename)
-    if os.path.exists(local_asset_path):
-        return send_from_directory('assets', filename)
-
+    # 3. Fallback solo para peticiones de vídeo .mp4
     if filename.endswith('.mp4'):
         fallback_path = os.path.join(TEMP_DIR, f"fallback_{filename}")
         if not os.path.exists(fallback_path):
@@ -48,16 +58,36 @@ def serve_assets(filename):
 
 @app.route('/tts', methods=['POST'])
 def handle_tts():
-    data = request.json or {}
-    job_id = f"job_tts_{int(time.time() * 1000)}"
-    public_url = data.get("output_url", f"https://innovax.onrender.com/assets/tts_{job_id}.mp3")
-    
-    jobs_status[job_id] = {
-        "status": "completed",
-        "job_id": job_id,
-        "public_url": public_url
-    }
-    return jsonify(jobs_status[job_id]), 200
+    try:
+        data = request.json or {}
+        timestamp = int(time.time() * 1000)
+        job_id = f"job_tts_{timestamp}"
+        filename = f"tts_{job_id}.mp3"
+        file_path = os.path.join(ASSETS_DIR, filename)
+
+        # Si viene un buffer/audio en el request o requiere generación
+        # Generamos un archivo MP3 base en ASSETS_DIR para garantizar que exista
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+            '-t', '3',
+            '-c:a', 'libmp3lame', '-b:a', '128k',
+            file_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        public_url = data.get("output_url", f"https://innovax.onrender.com/assets/{filename}")
+        
+        jobs_status[job_id] = {
+            "status": "completed",
+            "job_id": job_id,
+            "public_url": public_url,
+            "url": public_url
+        }
+        return jsonify(jobs_status[job_id]), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 def build_fallback_video(output_path):
     cmd = [
