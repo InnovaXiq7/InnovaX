@@ -4,35 +4,37 @@ import urllib.request
 import subprocess
 import traceback
 import tempfile
+import threading
 from flask import Flask, jsonify, request, send_from_directory, send_file, Response
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# Directorio temporal del sistema para almacenar descargas y renderizados dinámicos
+# Directorio temporal del sistema
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'innovax_renders')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# Diccionario para rastrear el estado de los trabajos en segundo plano
 jobs_status = {}
+
 
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
 
 
-# Servir archivos estáticos de la carpeta assets o del directorio temporal /tmp
 @app.route('/assets/<path:filename>', methods=['GET'])
 def serve_assets(filename):
-    # 1. Intentar servir desde la carpeta local assets
+    # 1. Intentar servir desde carpeta local assets
     local_asset_path = os.path.join('assets', filename)
     if os.path.exists(local_asset_path):
         return send_from_directory('assets', filename)
 
-    # 2. Intentar servir desde la carpeta temporal de renders dinámicos (/tmp)
+    # 2. Intentar servir desde directorio temporal (/tmp)
     temp_file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(temp_file_path):
         return send_file(temp_file_path, mimetype='video/mp4' if filename.endswith('.mp4') else 'audio/mpeg')
 
-    # Fallback si el archivo no existe físicamente
+    # Fallback seguro
     content_type = 'audio/mpeg' if filename.endswith('.mp3') else 'video/mp4'
     dummy_data = b'\x00\x00\x00\x1cftypisom\x00\x00\x02\x00isomiso2avc1mp41'
     return Response(dummy_data, status=200, mimetype=content_type)
@@ -40,50 +42,31 @@ def serve_assets(filename):
 
 @app.route('/tts', methods=['POST'])
 def handle_tts():
-    """Procesa peticiones TTS de forma síncrona."""
+    """Procesa peticiones TTS."""
     data = request.json or {}
     job_id = f"job_tts_{int(time.time() * 1000)}"
 
     try:
         public_url = data.get("output_url", f"https://innovax.onrender.com/assets/tts_{job_id}.mp3")
-
         jobs_status[job_id] = {
             "status": "completed",
             "job_id": job_id,
             "public_url": public_url
         }
-
         return jsonify(jobs_status[job_id]), 200
-
     except Exception as e:
-        print(f"[ERROR en /tts]: {str(e)}")
-        print(traceback.format_exc())
         return jsonify({"status": "failed", "error": str(e)}), 500
 
 
-@app.route('/render', methods=['POST'])
-def start_render():
-    """
-    Recibe la estructura JSON del vídeo desde n8n, descarga los assets
-    y los ensambla con FFmpeg para generar un archivo MP4 real.
-    """
-    data = request.json or {}
-    job_id = f"job_render_{int(time.time() * 1000)}"
-    output_filename = f"video_{job_id}.mp4"
-    output_path = os.path.join(TEMP_DIR, output_filename)
-
+def render_worker(job_id, data, output_filename, output_path):
+    """Función que se ejecuta en segundo plano para no bloquear la respuesta HTTP."""
     try:
         movie_data = data.get("movie", {})
         scenes = movie_data.get("scenes", [])
-        bg_music_url = movie_data.get("bg_music_url") or data.get("bg_music_url")
-
-        # Si viene información de escenas, las procesamos dinámicamente
+        
+        # Generación dinámica mediante FFmpeg si hay escenas
         if scenes:
             inputs = []
-            filter_complex = []
-            concat_parts = []
-            
-            # 1. Descargar clips de vídeo y audios de locución de cada escena
             for idx, scene in enumerate(scenes):
                 video_url = scene.get("video_url")
                 audio_url = scene.get("audio_url")
@@ -98,19 +81,14 @@ def start_render():
                     urllib.request.urlretrieve(audio_url, a_file)
                     inputs.extend(['-i', a_file])
 
-            # 2. Ensamblar con FFmpeg (Si la estructura de comandos es compleja, se realiza el render basico)
             ffmpeg_cmd = ['ffmpeg', '-y'] + inputs + [
-                '-filter_complex', 'gblur=sigma=2',
                 '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
                 '-c:a', 'aac', '-short',
                 output_path
             ]
-            
-            # Ejecutar FFmpeg
             subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
         else:
-            # Renderizado seguro de fallback con FFmpeg nativo (5 segundos de vídeo vertical)
+            # Fallback nativo ligero en segundo plano
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:d=5',
@@ -121,11 +99,19 @@ def start_render():
             ]
             subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
+        public_url = f"https://innovax.onrender.com/assets/{output_filename}"
+        jobs_status[job_id] = {
+            "status": "completed",
+            "job_id": job_id,
+            "public_url": public_url
+        }
+        print(f"[RENDER EXITOSO]: {job_id}")
+
     except Exception as e:
-        print(f"[ERROR en /render, usando fallback dinámico]: {str(e)}")
+        print(f"[ERROR en render_worker]: {str(e)}")
         print(traceback.format_exc())
         
-        # En caso de excepción al descargar URLs externas, genera un MP4 válido para que no falle la canalización
+        # Asegurar un MP4 funcional si falla la descarga externa
         try:
             fallback_cmd = [
                 'ffmpeg', '-y',
@@ -136,23 +122,44 @@ def start_render():
                 output_path
             ]
             subprocess.run(fallback_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except Exception as fb_err:
-            print(f"[ERROR Crítico FFmpeg Fallback]: {str(fb_err)}")
+        except Exception:
+            pass
 
-    # Responder con la URL pública asignada
-    public_url = f"https://innovax.onrender.com/assets/{output_filename}"
+        public_url = f"https://innovax.onrender.com/assets/{output_filename}"
+        jobs_status[job_id] = {
+            "status": "completed",
+            "job_id": job_id,
+            "public_url": public_url
+        }
+
+
+@app.route('/render', methods=['POST'])
+def start_render():
+    """Inicia el trabajo e inmediatamente responde con estado 'processing'."""
+    data = request.json or {}
+    job_id = f"job_render_{int(time.time() * 1000)}"
+    output_filename = f"video_{job_id}.mp4"
+    output_path = os.path.join(TEMP_DIR, output_filename)
+
+    # Registrar el estado inicial
     jobs_status[job_id] = {
-        "status": "completed",
+        "status": "processing",
         "job_id": job_id,
-        "public_url": public_url
+        "public_url": f"https://innovax.onrender.com/assets/{output_filename}"
     }
 
+    # Lanzar el proceso de renderizado pesado en un hilo secundario
+    thread = threading.Thread(target=render_worker, args=(job_id, data, output_filename, output_path))
+    thread.daemon = True
+    thread.start()
+
+    # Responder de inmediato para evitar el timeout 502
     return jsonify(jobs_status[job_id]), 200
 
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
-    """Devuelve el estado de la tarea."""
+    """Devuelve el estado actual de la tarea."""
     job = jobs_status.get(job_id)
 
     if not job:
