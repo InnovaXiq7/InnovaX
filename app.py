@@ -13,7 +13,6 @@ from faster_whisper import WhisperModel
 
 app = Flask(__name__)
 
-
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
@@ -32,7 +31,6 @@ JOBS = {}
 RENDER_LOCK = threading.Lock()
 WHISPER_LOCK = threading.Lock()
 
-# Límite de subida: 1 GB
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 
 PUBLIC_BASE_URL = os.environ.get(
@@ -42,11 +40,10 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 # ============================================================
-# WHISPER - CONFIGURACIÓN LIGERA PARA RENDER FREE
+# WHISPER
 # ============================================================
 
-# IMPORTANTE:
-# tiny consume mucha menos RAM que base.
+# tiny consume mucha menos memoria que base
 WHISPER_MODEL_SIZE = os.environ.get(
     "WHISPER_MODEL",
     "tiny"
@@ -66,7 +63,7 @@ def get_whisper_model():
             if WHISPER_MODEL is None:
 
                 print(
-                    f"[WHISPER] Cargando modelo ligero: "
+                    f"[WHISPER] Cargando modelo: "
                     f"{WHISPER_MODEL_SIZE}"
                 )
 
@@ -74,7 +71,7 @@ def get_whisper_model():
                     WHISPER_MODEL_SIZE,
                     device="cpu",
                     compute_type="int8",
-                    cpu_threads=1,
+                    cpu_threads=2,
                     num_workers=1
                 )
 
@@ -127,37 +124,10 @@ def clean_job(job_id):
 
 
 # ============================================================
-# LIMPIAR ARCHIVOS TEMPORALES ANTIGUOS
+# DESCARGAR AUDIO
 # ============================================================
 
-def cleanup_old_files():
-
-    try:
-
-        # Limpiar WAV temporales
-        for file in BASE.glob("transcribe_*.wav"):
-
-            try:
-                file.unlink()
-            except Exception:
-                pass
-
-    except Exception as e:
-
-        print(
-            "[CLEANUP ERROR]",
-            str(e)
-        )
-
-
-# ============================================================
-# DESCARGAR / EXTRAER AUDIO
-# ============================================================
-
-def download_audio(
-    url,
-    output_file
-):
+def download_audio(url, output_file):
 
     result = subprocess.run(
 
@@ -172,7 +142,7 @@ def download_audio(
             "-c:a",
             "aac",
             "-b:a",
-            "96k",
+            "128k",
             str(output_file)
         ],
 
@@ -228,11 +198,8 @@ def generate_tts(
     asyncio.run(
 
         generate_tts_async(
-
             text,
-
             voice,
-
             output_file
         )
     )
@@ -292,15 +259,14 @@ def run_job(
 
                 try:
 
-                    duration = float(
-                        duration
-                    )
+                    duration = float(duration)
 
                 except Exception:
 
                     duration = 7
 
                 if duration < 1:
+
                     duration = 1
 
                 video_out = (
@@ -372,7 +338,7 @@ def run_job(
                         "aac",
 
                         "-b:a",
-                        "96k",
+                        "128k",
 
                         "-shortest",
 
@@ -429,14 +395,6 @@ def run_job(
                         str(video_out)
                     ]
 
-                # =================================================
-                # EJECUTAR FFMPEG
-                # =================================================
-
-                print(
-                    f"[RENDER] Procesando escena {i + 1}"
-                )
-
                 result = subprocess.run(
 
                     command,
@@ -454,12 +412,6 @@ def run_job(
 
                         f"Error rendering scene {i + 1}:\n"
                         f"{result.stderr[-4000:]}"
-                    )
-
-                if not video_out.exists():
-
-                    raise RuntimeError(
-                        f"No se creó la escena {i + 1}"
                     )
 
                 inputs.append(
@@ -548,16 +500,6 @@ def run_job(
                     + result.stderr[-4000:]
                 )
 
-            if not final_file.exists():
-
-                raise RuntimeError(
-                    "El vídeo final no fue creado."
-                )
-
-            # =================================================
-            # JOB COMPLETADO
-            # =================================================
-
             JOBS[job_id].update(
 
                 status="succeeded",
@@ -571,14 +513,6 @@ def run_job(
                 )
             )
 
-            print(
-                f"[RENDER] Job completado: {job_id}"
-            )
-
-            # =================================================
-            # LIMPIEZA DE ESCENAS
-            # =================================================
-
             for video_file in inputs:
 
                 video_file.unlink(
@@ -590,14 +524,6 @@ def run_job(
             )
 
         except Exception as e:
-
-            print(
-                f"[RENDER ERROR] {job_id}"
-            )
-
-            print(
-                str(e)
-            )
 
             JOBS[job_id].update(
 
@@ -938,115 +864,229 @@ def video_file(filename):
 
 
 # ============================================================
-# TRANSCRIBIR VIDEO CON WHISPER
+# TRANSCRIBIR VIDEO
 # ============================================================
 
 @app.post("/transcribe")
 def transcribe():
 
     input_file = None
+    should_delete_input = False
 
     try:
 
-        cleanup_old_files()
+        # ====================================================
+        # OPCIÓN 1: ARCHIVO DIRECTO
+        # ====================================================
 
-        data = request.get_json(
-            silent=True
-        ) or {}
-
-        video_url = (
-            data.get("video_url")
+        uploaded_video = (
+            request.files.get("file")
             or
-            data.get("url")
-        )
-
-        # ====================================================
-        # LIMPIAR URL
-        # ====================================================
-
-        if video_url:
-
-            video_url = str(
-                video_url
-            ).strip()
-
-            if video_url.startswith("="):
-
-                video_url = (
-                    video_url[1:]
-                    .strip()
-                )
-
-            if (
-                len(video_url) >= 2
-                and
-                (
-                    (
-                        video_url.startswith('"')
-                        and
-                        video_url.endswith('"')
-                    )
-                    or
-                    (
-                        video_url.startswith("'")
-                        and
-                        video_url.endswith("'")
-                    )
-                )
-            ):
-
-                video_url = (
-                    video_url[1:-1]
-                    .strip()
-                )
-
-        if not video_url:
-
-            return jsonify(
-
-                ok=False,
-
-                error="Falta video_url."
-
-            ), 400
-
-        print(
-            "[WHISPER] Vídeo recibido:"
-        )
-
-        print(
-            video_url
-        )
-
-        # ====================================================
-        # VALIDAR URL
-        # ====================================================
-
-        if not (
-            video_url.startswith("http://")
+            request.files.get("video")
             or
-            video_url.startswith("https://")
-        ):
+            request.files.get("data")
+        )
 
-            raise ValueError(
-                "video_url no es una URL HTTP/HTTPS válida: "
-                + video_url
+        if uploaded_video:
+
+            temp_id = uuid.uuid4().hex
+
+            extension = (
+                Path(
+                    uploaded_video.filename
+                    or "video.mp4"
+                ).suffix.lower()
             )
 
+            if not extension:
+
+                extension = ".mp4"
+
+            input_file = (
+                BASE /
+                f"transcribe_{temp_id}{extension}"
+            )
+
+            uploaded_video.save(
+                input_file
+            )
+
+            should_delete_input = True
+
+            print(
+                "[WHISPER] Archivo recibido "
+                "directamente por multipart."
+            )
+
+        else:
+
+            # =================================================
+            # OPCIÓN 2: URL
+            # =================================================
+
+            data = request.get_json(
+                silent=True
+            ) or {}
+
+            video_url = (
+                data.get("video_url")
+                or
+                data.get("url")
+            )
+
+            if video_url:
+
+                video_url = str(
+                    video_url
+                ).strip()
+
+                if video_url.startswith("="):
+
+                    video_url = (
+                        video_url[1:]
+                        .strip()
+                    )
+
+                if (
+                    len(video_url) >= 2
+                    and
+                    (
+                        (
+                            video_url.startswith('"')
+                            and
+                            video_url.endswith('"')
+                        )
+                        or
+                        (
+                            video_url.startswith("'")
+                            and
+                            video_url.endswith("'")
+                        )
+                    )
+                ):
+
+                    video_url = (
+                        video_url[1:-1]
+                        .strip()
+                    )
+
+            if not video_url:
+
+                return jsonify(
+
+                    ok=False,
+
+                    error=(
+                        "Falta el archivo de vídeo "
+                        "o video_url."
+                    )
+
+                ), 400
+
+            print(
+                "[WHISPER] Vídeo recibido por URL:"
+            )
+
+            print(
+                video_url
+            )
+
+            if not (
+                video_url.startswith("http://")
+                or
+                video_url.startswith("https://")
+            ):
+
+                raise ValueError(
+                    "video_url no es una URL HTTP/HTTPS válida: "
+                    + video_url
+                )
+
+            temp_id = uuid.uuid4().hex
+
+            input_file = (
+                BASE /
+                f"transcribe_{temp_id}.mp4"
+            )
+
+            # Descargar primero el vídeo.
+            # Esto evita que ffmpeg tenga problemas
+            # con URLs temporales.
+
+            print(
+                "[WHISPER] Descargando vídeo..."
+            )
+
+            download_result = subprocess.run(
+
+                [
+
+                    "ffmpeg",
+
+                    "-y",
+
+                    "-threads",
+                    "1",
+
+                    "-i",
+                    video_url,
+
+                    "-c",
+                    "copy",
+
+                    str(input_file)
+
+                ],
+
+                stdout=subprocess.DEVNULL,
+
+                stderr=subprocess.PIPE,
+
+                text=True
+            )
+
+            if download_result.returncode != 0:
+
+                raise RuntimeError(
+
+                    "No se pudo descargar el vídeo:\n"
+                    + download_result.stderr[-4000:]
+                )
+
+            should_delete_input = True
+
         # ====================================================
-        # TEMPORAL
+        # COMPROBAR ARCHIVO
         # ====================================================
 
-        temp_id = uuid.uuid4().hex
+        if not input_file.exists():
 
-        input_file = (
-            BASE /
-            f"transcribe_{temp_id}.wav"
+            raise RuntimeError(
+                "El vídeo no existe después de recibirlo."
+            )
+
+        if input_file.stat().st_size <= 0:
+
+            raise RuntimeError(
+                "El archivo de vídeo está vacío."
+            )
+
+        print(
+            "[WHISPER] Vídeo preparado:"
+        )
+
+        print(
+            str(input_file)
         )
 
         # ====================================================
         # EXTRAER AUDIO
         # ====================================================
+
+        audio_file = (
+            BASE /
+            f"audio_{uuid.uuid4().hex}.wav"
+        )
 
         print(
             "[WHISPER] Extrayendo audio..."
@@ -1064,7 +1104,7 @@ def transcribe():
                 "1",
 
                 "-i",
-                video_url,
+                str(input_file),
 
                 "-map",
                 "0:a:0?",
@@ -1080,7 +1120,7 @@ def transcribe():
                 "-c:a",
                 "pcm_s16le",
 
-                str(input_file)
+                str(audio_file)
 
             ],
 
@@ -1100,7 +1140,7 @@ def transcribe():
                 + result.stderr[-4000:]
             )
 
-        if not input_file.exists():
+        if not audio_file.exists():
 
             raise RuntimeError(
                 "No se creó el archivo de audio."
@@ -1111,7 +1151,7 @@ def transcribe():
         # ====================================================
 
         print(
-            "[WHISPER] Cargando modelo ligero..."
+            "[WHISPER] Cargando modelo..."
         )
 
         model = get_whisper_model()
@@ -1122,7 +1162,7 @@ def transcribe():
 
         segments, info = model.transcribe(
 
-            str(input_file),
+            str(audio_file),
 
             language="es",
 
@@ -1136,9 +1176,7 @@ def transcribe():
         )
 
         output_segments = []
-
         output_words = []
-
         full_text = []
 
         for segment in segments:
@@ -1225,16 +1263,18 @@ def transcribe():
             })
 
         # ====================================================
-        # LIMPIAR WAV
+        # LIMPIEZA
         # ====================================================
 
-        input_file.unlink(
+        audio_file.unlink(
             missing_ok=True
         )
 
-        # ====================================================
-        # IDIOMA
-        # ====================================================
+        if should_delete_input:
+
+            input_file.unlink(
+                missing_ok=True
+            )
 
         detected_language = (
             info.language
@@ -1265,13 +1305,10 @@ def transcribe():
             "[WHISPER] Transcripción terminada."
         )
 
-        # ====================================================
-        # RESULTADO
-        # ====================================================
-
         return jsonify({
 
-            "ok": True,
+            "ok":
+                True,
 
             "language":
                 detected_language,
@@ -1540,7 +1577,7 @@ def audio_file(
 
 
 # ============================================================
-# ERROR: ARCHIVO DEMASIADO GRANDE
+# ERROR 413
 # ============================================================
 
 @app.errorhandler(413)
