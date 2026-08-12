@@ -6,6 +6,7 @@ import threading
 import asyncio
 import re
 import gc
+import requests
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -120,11 +121,23 @@ def clean_job(job_id):
         shutil.rmtree(job_dir, ignore_errors=True)
 
 
+def download_file(url, dest_path):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    with requests.get(url, headers=headers, stream=True, timeout=30) as r:
+        r.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+
 def download_audio(url, output_file):
+    temp_download = output_file.with_suffix(".raw")
+    download_file(url, temp_download)
+    
     result = subprocess.run(
         [
             "ffmpeg", "-y", "-threads", "1",
-            "-i", url, "-vn",
+            "-i", str(temp_download), "-vn",
             "-c:a", "aac", "-b:a", "128k",
             str(output_file)
         ],
@@ -132,8 +145,11 @@ def download_audio(url, output_file):
         stderr=subprocess.PIPE,
         text=True
     )
+    if temp_download.exists():
+        temp_download.unlink()
+        
     if result.returncode != 0:
-        raise RuntimeError("Error descargando audio:\n" + result.stderr[-4000:])
+        raise RuntimeError("Error convirtiendo audio descargado:\n" + result.stderr[-2000:])
 
 
 async def generate_tts_async(text, voice, output_file):
@@ -226,7 +242,7 @@ def create_ass_subtitles(text, duration, output_file):
 
 
 # ============================================================
-# RENDER DE ESCENAS CON ZOOM DINÁMICO OPTIMIZADO PARA RAM
+# RENDER PROCESO PRINCIPAL
 # ============================================================
 
 def run_job(job_id, scenes):
@@ -244,6 +260,10 @@ def run_job(job_id, scenes):
                 if not src:
                     raise ValueError(f"La escena {i + 1} no tiene video_url.")
 
+                # Descargar clip de vídeo original localmente para evitar descargas en vuelo
+                raw_video_file = job_dir / f"raw_video_{i}.mp4"
+                download_file(src, raw_video_file)
+
                 audio_url = scene.get("audio_url") or scene.get("audio_src")
                 bg_music_url = scene.get("bg_music_url") or scene.get("bg_audio_url")
                 subtitle = clean_text(scene.get("subtitle") or scene.get("voiceover") or scene.get("text") or "")
@@ -255,7 +275,7 @@ def run_job(job_id, scenes):
                 bg_audio = None
                 ass_file = job_dir / f"subtitle_{i}.ass"
 
-                # 1. AUDIO DE VOZ / LOCUCIÓN
+                # 1. AUDIO VOZ
                 if audio_url:
                     voice_audio = job_dir / f"voice_{i}.m4a"
                     download_audio(audio_url, voice_audio)
@@ -268,31 +288,25 @@ def run_job(job_id, scenes):
                     if audio_dur:
                         duration = audio_dur
 
-                # 2. MÚSICA DE FONDO
+                # 2. MUSICA
                 if bg_music_url:
                     bg_audio = job_dir / f"bg_{i}.m4a"
                     download_audio(bg_music_url, bg_audio)
 
-                # 3. SUBTÍTULOS ESTILO TIKTOK
+                # 3. SUBTITULOS
                 has_subtitles = False
                 if subtitle:
                     has_subtitles = create_ass_subtitles(subtitle, duration, ass_file)
 
-                # 4. FILTROS DE VÍDEO CON MEMORIA RAM CONTROLADA
-                # Se descompone el filtro reduciendo primero el tamaño de entrada para ahorrar RAM en el zoompan
-                video_filter = (
-                    "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
-                    "zoompan=z='min(zoom+0.0015,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280,"
-                    "fps=30"
-                )
+                # 4. FILTROS DE VIDEO (Scale + Crop + TikTok Subtitles)
+                video_filter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30"
 
                 if has_subtitles:
                     ass_path = ass_file.as_posix().replace(":", r"\:").replace("'", r"\'")
                     video_filter += f",subtitles='{ass_path}'"
 
-                cmd = ["ffmpeg", "-y", "-threads", "1", "-i", src]
+                cmd = ["ffmpeg", "-y", "-threads", "1", "-i", str(raw_video_file)]
 
-                # Construir las entradas y filtros de audio
                 if voice_audio and voice_audio.exists() and bg_audio and bg_audio.exists():
                     cmd.extend(["-i", str(voice_audio), "-i", str(bg_audio)])
                     filter_complex = (
@@ -331,21 +345,25 @@ def run_job(job_id, scenes):
                         "-an"
                     ])
 
-                # Limitación estricta de hilos y tamaño de búfer de RAM
                 cmd.extend([
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                    "-threads", "1", "-max_mxf_audio_actions", "1",
+                    "-threads", "1",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
                     "-movflags", "+faststart", str(scene_video)
                 ])
 
                 result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                
+                # Limpiar vídeo crudo original
+                if raw_video_file.exists():
+                    raw_video_file.unlink(missing_ok=True)
+
                 if result.returncode != 0:
-                    raise RuntimeError(f"Error renderizando escena {i + 1}:\n" + result.stderr[-5000:])
+                    print(f"ERROR FFMPEG ESCENA {i+1}:", result.stderr)
+                    raise RuntimeError(f"Error renderizando escena {i + 1}:\n" + result.stderr[-2000:])
 
                 inputs.append(scene_video)
 
-                # Limpieza inmediata de temporales y RAM entre escenas
                 if voice_audio and voice_audio.exists():
                     voice_audio.unlink(missing_ok=True)
                 if bg_audio and bg_audio.exists():
@@ -354,7 +372,7 @@ def run_job(job_id, scenes):
                     ass_file.unlink(missing_ok=True)
                 gc.collect()
 
-            # CONCATENACIÓN
+            # CONCATENAR ESCENAS
             concat_file = job_dir / "concat.txt"
             concat_lines = [f"file '{v.as_posix()}'\n" for v in inputs]
             concat_file.write_text("".join(concat_lines), encoding="utf-8")
@@ -370,7 +388,8 @@ def run_job(job_id, scenes):
 
             result = subprocess.run(concat_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0:
-                raise RuntimeError("Error concatenando escenas:\n" + result.stderr[-5000:])
+                print("ERROR FFMPEG CONCAT:", result.stderr)
+                raise RuntimeError("Error concatenando escenas:\n" + result.stderr[-2000:])
 
             JOBS[job_id].update(
                 status="succeeded",
@@ -395,11 +414,11 @@ def run_job(job_id, scenes):
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=12, ram_optimized=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=14)
 
 @app.get("/")
 def root():
-    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=12, ram_optimized=True)
+    return jsonify(ok=True, service="n8n-free-ffmpeg-renderer", version=14)
 
 @app.post("/tts")
 def tts():
