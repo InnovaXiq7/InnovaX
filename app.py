@@ -8,10 +8,11 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
 import edge_tts
-from faster_whisper import WhisperModel
+import requests
 
 
 app = Flask(__name__)
+
 
 # ============================================================
 # CONFIGURACIÓN
@@ -29,9 +30,9 @@ VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 JOBS = {}
 
 RENDER_LOCK = threading.Lock()
-WHISPER_LOCK = threading.Lock()
 
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
+
 
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL",
@@ -40,45 +41,17 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 # ============================================================
-# WHISPER
+# GROQ
 # ============================================================
 
-WHISPER_MODEL_SIZE = os.environ.get(
-    "WHISPER_MODEL",
-    "base"
+GROQ_API_KEY = os.environ.get(
+    "GROQ_API_KEY",
+    ""
 )
 
-WHISPER_MODEL = None
-
-
-def get_whisper_model():
-
-    global WHISPER_MODEL
-
-    if WHISPER_MODEL is None:
-
-        with WHISPER_LOCK:
-
-            if WHISPER_MODEL is None:
-
-                print(
-                    f"[WHISPER] Cargando modelo: "
-                    f"{WHISPER_MODEL_SIZE}"
-                )
-
-                WHISPER_MODEL = WhisperModel(
-                    WHISPER_MODEL_SIZE,
-                    device="cpu",
-                    compute_type="int8",
-                    cpu_threads=2,
-                    num_workers=1
-                )
-
-                print(
-                    "[WHISPER] Modelo cargado correctamente"
-                )
-
-    return WHISPER_MODEL
+GROQ_TRANSCRIPTION_URL = (
+    "https://api.groq.com/openai/v1/audio/transcriptions"
+)
 
 
 # ============================================================
@@ -402,6 +375,10 @@ def run_job(
                         str(video_out)
                     ]
 
+                # =================================================
+                # EJECUTAR FFMPEG
+                # =================================================
+
                 result = subprocess.run(
 
                     command,
@@ -573,7 +550,9 @@ def health():
 
         transcription=True,
 
-        whisper_model=WHISPER_MODEL_SIZE
+        transcription_provider="groq",
+
+        groq_configured=bool(GROQ_API_KEY)
     )
 
 
@@ -596,7 +575,9 @@ def root():
 
         video_upload=True,
 
-        transcription=True
+        transcription=True,
+
+        transcription_provider="groq"
     )
 
 
@@ -877,436 +858,349 @@ def video_file(filename):
 
 
 # ============================================================
-# TRANSCRIBIR VIDEO CON WHISPER
+# TRANSCRIBIR VIDEO CON GROQ WHISPER
 # ============================================================
 
 @app.post("/transcribe")
 def transcribe():
 
-    input_file = None
-
     try:
 
-        # ====================================================
-        # MODO 1:
-        # ARCHIVO DIRECTO DESDE N8N
-        # ====================================================
+        if not GROQ_API_KEY:
 
-        uploaded_file = (
-            request.files.get("file")
+            return jsonify(
+
+                ok=False,
+
+                error=(
+                    "GROQ_API_KEY no está configurada "
+                    "en las variables de entorno de Render."
+                )
+
+            ), 500
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        video_url = (
+            data.get("video_url")
             or
-            request.files.get("data")
-            or
-            request.files.get("video")
+            data.get("url")
         )
-
-        if uploaded_file:
-
-            print(
-                "[WHISPER] Archivo recibido directamente "
-                "desde n8n."
-            )
-
-            original_name = (
-                uploaded_file.filename
-                or "input.mp4"
-            )
-
-            extension = (
-                Path(
-                    original_name
-                ).suffix.lower()
-            )
-
-            if not extension:
-
-                extension = ".mp4"
-
-            temp_id = uuid.uuid4().hex
-
-            input_file = (
-                BASE /
-                f"transcribe_{temp_id}{extension}"
-            )
-
-            uploaded_file.save(
-                input_file
-            )
-
-            if not input_file.exists():
-
-                raise RuntimeError(
-                    "El archivo de vídeo no se pudo guardar."
-                )
-
-            print(
-                "[WHISPER] Archivo guardado en:"
-            )
-
-            print(
-                str(input_file)
-            )
 
         # ====================================================
-        # MODO 2:
-        # URL JSON
+        # LIMPIAR URL
         # ====================================================
 
-        else:
+        if video_url:
 
-            data = request.get_json(
-                silent=True
-            ) or {}
-
-            video_url = (
-                data.get("video_url")
-                or
-                data.get("url")
-            )
-
-            if video_url:
-
-                video_url = str(
-                    video_url
-                ).strip()
-
-                # Eliminar =
-                if video_url.startswith("="):
-
-                    video_url = (
-                        video_url[1:]
-                        .strip()
-                    )
-
-                # Eliminar comillas
-                if (
-                    len(video_url) >= 2
-                    and
-                    (
-                        (
-                            video_url.startswith('"')
-                            and
-                            video_url.endswith('"')
-                        )
-                        or
-                        (
-                            video_url.startswith("'")
-                            and
-                            video_url.endswith("'")
-                        )
-                    )
-                ):
-
-                    video_url = (
-                        video_url[1:-1]
-                        .strip()
-                    )
-
-                if not (
-                    video_url.startswith("http://")
-                    or
-                    video_url.startswith("https://")
-                ):
-
-                    raise ValueError(
-                        "video_url no es una URL "
-                        "HTTP/HTTPS válida: "
-                        + video_url
-                    )
-
-                print(
-                    "[WHISPER] Descargando vídeo "
-                    "desde URL:"
-                )
-
-                print(
-                    video_url
-                )
-
-                temp_id = uuid.uuid4().hex
-
-                input_file = (
-                    BASE /
-                    f"transcribe_{temp_id}.mp4"
-                )
-
-                download_result = subprocess.run(
-
-                    [
-
-                        "ffmpeg",
-
-                        "-y",
-
-                        "-threads",
-                        "1",
-
-                        "-i",
-                        video_url,
-
-                        "-c",
-                        "copy",
-
-                        str(input_file)
-                    ],
-
-                    stdout=subprocess.DEVNULL,
-
-                    stderr=subprocess.PIPE,
-
-                    text=True
-                )
-
-                if (
-                    download_result.returncode != 0
-                    or
-                    not input_file.exists()
-                ):
-
-                    raise RuntimeError(
-
-                        "No se pudo descargar "
-                        "el vídeo desde la URL:\n"
-                        +
-                        download_result.stderr[-4000:]
-                    )
-
-            else:
-
-                return jsonify(
-
-                    ok=False,
-
-                    error=(
-                        "Falta el archivo de vídeo "
-                        "o video_url."
-                    )
-
-                ), 400
-
-        # ====================================================
-        # EXTRAER AUDIO
-        # ====================================================
-
-        print(
-            "[WHISPER] Extrayendo audio..."
-        )
-
-        audio_id = uuid.uuid4().hex
-
-        audio_file = (
-            BASE /
-            f"transcribe_audio_{audio_id}.wav"
-        )
-
-        result = subprocess.run(
-
-            [
-
-                "ffmpeg",
-
-                "-y",
-
-                "-threads",
-                "1",
-
-                "-i",
-                str(input_file),
-
-                "-map",
-                "0:a:0?",
-
-                "-vn",
-
-                "-ac",
-                "1",
-
-                "-ar",
-                "16000",
-
-                "-c:a",
-                "pcm_s16le",
-
-                str(audio_file)
-            ],
-
-            stdout=subprocess.DEVNULL,
-
-            stderr=subprocess.PIPE,
-
-            text=True
-        )
-
-        if result.returncode != 0:
-
-            raise RuntimeError(
-
-                "No se pudo extraer el audio "
-                "del vídeo:\n"
-                +
-                result.stderr[-4000:]
-            )
-
-        if not audio_file.exists():
-
-            raise RuntimeError(
-                "No se creó el archivo de audio."
-            )
-
-        # ====================================================
-        # WHISPER
-        # ====================================================
-
-        print(
-            "[WHISPER] Cargando modelo..."
-        )
-
-        model = get_whisper_model()
-
-        print(
-            "[WHISPER] Transcribiendo..."
-        )
-
-        segments, info = model.transcribe(
-
-            str(audio_file),
-
-            language="es",
-
-            beam_size=5,
-
-            word_timestamps=True,
-
-            vad_filter=True,
-
-            condition_on_previous_text=True
-        )
-
-        output_segments = []
-
-        output_words = []
-
-        full_text = []
-
-        for segment in segments:
-
-            segment_text = (
-                segment.text
-                or ""
+            video_url = str(
+                video_url
             ).strip()
 
-            if segment_text:
+            if video_url.startswith("="):
 
-                full_text.append(
-                    segment_text
+                video_url = (
+                    video_url[1:]
+                    .strip()
                 )
 
-            segment_words = []
-
-            if segment.words:
-
-                for word in segment.words:
-
-                    word_text = (
-                        word.word
-                        or ""
-                    ).strip()
-
-                    if not word_text:
-
-                        continue
-
-                    word_data = {
-
-                        "word": word_text,
-
-                        "start": round(
-                            float(
-                                word.start
-                            ),
-                            3
-                        ),
-
-                        "end": round(
-                            float(
-                                word.end
-                            ),
-                            3
-                        )
-                    }
-
-                    segment_words.append(
-                        word_data
+            if (
+                len(video_url) >= 2
+                and
+                (
+                    (
+                        video_url.startswith('"')
+                        and
+                        video_url.endswith('"')
                     )
-
-                    output_words.append(
-                        word_data
+                    or
+                    (
+                        video_url.startswith("'")
+                        and
+                        video_url.endswith("'")
                     )
+                )
+            ):
 
-            output_segments.append({
+                video_url = (
+                    video_url[1:-1]
+                    .strip()
+                )
 
-                "start": round(
-                    float(
-                        segment.start
-                    ),
-                    3
-                ),
+        if not video_url:
 
-                "end": round(
-                    float(
-                        segment.end
-                    ),
-                    3
-                ),
+            return jsonify(
 
-                "text": segment_text,
+                ok=False,
 
-                "words": segment_words
-            })
+                error="Falta video_url."
 
-        # ====================================================
-        # LIMPIAR
-        # ====================================================
+            ), 400
 
-        audio_file.unlink(
-            missing_ok=True
+        if not (
+            video_url.startswith("http://")
+            or
+            video_url.startswith("https://")
+        ):
+
+            return jsonify(
+
+                ok=False,
+
+                error=(
+                    "video_url no es una URL "
+                    "HTTP/HTTPS válida."
+                )
+
+            ), 400
+
+        print(
+            "[GROQ] Transcribiendo vídeo:"
         )
 
-        input_file.unlink(
-            missing_ok=True
+        print(
+            video_url
         )
 
         # ====================================================
-        # INFORMACIÓN IDIOMA
+        # PETICIÓN A GROQ
         # ====================================================
 
-        detected_language = (
-            info.language
-            if info
-            else "es"
+        headers = {
+
+            "Authorization":
+                f"Bearer {GROQ_API_KEY}"
+        }
+
+        payload = {
+
+            "model":
+                "whisper-large-v3-turbo",
+
+            "url":
+                video_url,
+
+            "language":
+                "es",
+
+            "response_format":
+                "verbose_json",
+
+            "timestamp_granularities[]":
+                [
+                    "segment",
+                    "word"
+                ],
+
+            "temperature":
+                0
+        }
+
+        response = requests.post(
+
+            GROQ_TRANSCRIPTION_URL,
+
+            headers=headers,
+
+            data=payload,
+
+            timeout=300
         )
 
-        language_probability = None
+        print(
+            "[GROQ] HTTP:",
+            response.status_code
+        )
 
-        if info:
+        if response.status_code != 200:
 
             try:
 
-                language_probability = round(
-
-                    float(
-                        info.language_probability
-                    ),
-
-                    4
+                error_data = (
+                    response.json()
                 )
 
             except Exception:
 
-                language_probability = None
+                error_data = (
+                    response.text
+                )
+
+            raise RuntimeError(
+
+                "Groq transcription error "
+                f"HTTP {response.status_code}: "
+                f"{error_data}"
+            )
+
+        result = response.json()
+
+        # ====================================================
+        # SEGMENTOS
+        # ====================================================
+
+        raw_segments = (
+            result.get(
+                "segments",
+                []
+            )
+        )
+
+        output_segments = []
+
+        for segment in raw_segments:
+
+            segment_words = []
+
+            for word in (
+                segment.get(
+                    "words",
+                    []
+                )
+                or []
+            ):
+
+                word_text = (
+                    word.get(
+                        "word",
+                        ""
+                    )
+                    or ""
+                ).strip()
+
+                if not word_text:
+
+                    continue
+
+                try:
+
+                    word_start = round(
+                        float(
+                            word.get(
+                                "start",
+                                0
+                            )
+                        ),
+                        3
+                    )
+
+                except Exception:
+
+                    word_start = 0
+
+                try:
+
+                    word_end = round(
+                        float(
+                            word.get(
+                                "end",
+                                0
+                            )
+                        ),
+                        3
+                    )
+
+                except Exception:
+
+                    word_end = word_start
+
+                segment_words.append({
+
+                    "word":
+                        word_text,
+
+                    "start":
+                        word_start,
+
+                    "end":
+                        word_end
+                })
+
+            try:
+
+                segment_start = round(
+                    float(
+                        segment.get(
+                            "start",
+                            0
+                        )
+                    ),
+                    3
+                )
+
+            except Exception:
+
+                segment_start = 0
+
+            try:
+
+                segment_end = round(
+                    float(
+                        segment.get(
+                            "end",
+                            0
+                        )
+                    ),
+                    3
+                )
+
+            except Exception:
+
+                segment_end = segment_start
+
+            segment_text = (
+                segment.get(
+                    "text",
+                    ""
+                )
+                or ""
+            ).strip()
+
+            output_segments.append({
+
+                "start":
+                    segment_start,
+
+                "end":
+                    segment_end,
+
+                "text":
+                    segment_text,
+
+                "words":
+                    segment_words
+            })
+
+        # ====================================================
+        # TODAS LAS PALABRAS
+        # ====================================================
+
+        output_words = []
+
+        for segment in output_segments:
+
+            for word in segment["words"]:
+
+                output_words.append(
+                    word
+                )
+
+        # ====================================================
+        # TEXTO COMPLETO
+        # ====================================================
+
+        full_text = (
+            result.get(
+                "text",
+                ""
+            )
+            or ""
+        ).strip()
 
         print(
-            "[WHISPER] Transcripción terminada."
+            "[GROQ] Transcripción terminada."
         )
 
         # ====================================================
@@ -1315,18 +1209,20 @@ def transcribe():
 
         return jsonify({
 
-            "ok": True,
+            "ok":
+                True,
+
+            "provider":
+                "groq",
+
+            "model":
+                "whisper-large-v3-turbo",
 
             "language":
-                detected_language,
-
-            "language_probability":
-                language_probability,
+                "es",
 
             "text":
-                " ".join(
-                    full_text
-                ),
+                full_text,
 
             "segments":
                 output_segments,
@@ -1338,24 +1234,12 @@ def transcribe():
     except Exception as e:
 
         print(
-            "[WHISPER ERROR]"
+            "[GROQ TRANSCRIPTION ERROR]"
         )
 
         print(
             str(e)
         )
-
-        if input_file:
-
-            try:
-
-                input_file.unlink(
-                    missing_ok=True
-                )
-
-            except Exception:
-
-                pass
 
         return jsonify(
 
