@@ -23,13 +23,12 @@ def background_render_process(job_id, payload):
     
     try:
         # -------------------------------------------------------------
-        # AQUÍ VA TU LÓGICA REA L DE RENDERIZADO / FFMPEG / TTS
-        # Ejemplo:
-        # process_ffmpeg_video(payload)
+        # AQUÍ VA TU LÓGICA REAL DE RENDERIZADO / FFMPEG / TTS
+        # Por ejemplo, usar el payload['voiceover'] recibido desde n8n
         # -------------------------------------------------------------
         
-        # Simulación de resultado (reemplazar con la ruta/URL real de tu vídeo)
-        result_url = payload.get("output_url", f"/assets/output_{job_id}.mp4")
+        # Simulación de resultado (reemplazar con tu archivo o respuesta real)
+        result_url = payload.get("output_url", f"/assets/output_{job_id}.mp3")
 
         # Marcar la tarea como completada
         jobs_status[job_id]["status"] = "completed"
@@ -50,23 +49,43 @@ def index():
     return send_from_directory('.', 'index.html')
 
 
-@app.route('/render', methods=['POST'])
-def start_render():
-    """Inicia una tarea de renderizado en segundo plano."""
+@app.route('/tts', methods=['POST'])
+def handle_tts():
+    """Ruta específica enviada desde n8n (POST)"""
     data = request.json or {}
-    job_id = f"job_{int(time.time() * 1000)}"
+    job_id = f"job_tts_{int(time.time() * 1000)}"
 
-    # Iniciar la tarea en un hilo independiente (Thread)
     thread = threading.Thread(target=background_render_process, args=(job_id, data))
     thread.daemon = True
     thread.start()
 
-    return jsonify({"job_id": job_id, "status": "processing"}), 200
+    return jsonify({
+        "status": "processing",
+        "job_id": job_id,
+        "message": "Petición TTS recibida e iniciada"
+    }), 200
+
+
+@app.route('/render', methods=['POST'])
+def start_render():
+    """Ruta genérica de renderizado (POST)"""
+    data = request.json or {}
+    job_id = f"job_render_{int(time.time() * 1000)}"
+
+    thread = threading.Thread(target=background_render_process, args=(job_id, data))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "status": "processing",
+        "job_id": job_id,
+        "message": "Renderizado iniciado"
+    }), 200
 
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
-    """Devuelve el estado de la tarea solicitada por el frontend."""
+    """Devuelve el estado de la tarea solicitada por el frontend o n8n"""
     job = jobs_status.get(job_id)
 
     # 1. Si el job_id no existe, responder 404
@@ -78,7 +97,7 @@ def get_status(job_id):
         elapsed = time.time() - job.get("started_at", time.time())
         if elapsed > 600:
             job["status"] = "failed"
-            job["error"] = "El renderizado ha superado el tiempo límite (Timeout)."
+            job["error"] = "El proceso ha superado el tiempo límite (Timeout)."
 
     return jsonify(job), 200
 
