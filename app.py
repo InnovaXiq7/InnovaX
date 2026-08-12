@@ -6,26 +6,17 @@ import traceback
 import tempfile
 import threading
 import gc
-from flask import Flask, jsonify, request, send_from_directory, send_file, Response
+from flask import Flask, jsonify, request, send_from_directory, send_file
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# Directorio temporal garantizado para el sistema
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'innovax_renders')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Diccionario para almacenar el estado de los renders en memoria
 jobs_status = {}
-
-# Cerrojo para evitar ejecuciones concurrentes que excedan los 512 MB de RAM en Render
 render_lock = threading.Lock()
 
-# Filtro FFmpeg para escalar y recortar automáticamente a 1080x1920 (9:16 vertical)
-VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1"
-
-
 def download_file(url, destination_path):
-    """Descarga archivos HTTP/HTTPS enviando un User-Agent para evitar bloqueos 403."""
     req = urllib.request.Request(
         url, 
         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -33,15 +24,12 @@ def download_file(url, destination_path):
     with urllib.request.urlopen(req, timeout=30) as response, open(destination_path, 'wb') as out_file:
         out_file.write(response.read())
 
-
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
 
-
 @app.route('/assets/<path:filename>', methods=['GET'])
 def serve_assets(filename):
-    """Sirve los archivos procesados desde el directorio temporal o fallback seguro."""
     temp_file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
         return send_file(temp_file_path, mimetype='video/mp4' if filename.endswith('.mp4') else 'audio/mpeg')
@@ -58,7 +46,6 @@ def serve_assets(filename):
 
     return jsonify({"error": "File not found"}), 404
 
-
 @app.route('/tts', methods=['POST'])
 def handle_tts():
     data = request.json or {}
@@ -72,9 +59,7 @@ def handle_tts():
     }
     return jsonify(jobs_status[job_id]), 200
 
-
 def build_fallback_video(output_path):
-    """Genera un vídeo sintético de prueba en 1080x1920 con bajo consumo de memoria."""
     cmd = [
         'ffmpeg', '-y',
         '-threads', '2',
@@ -87,30 +72,23 @@ def build_fallback_video(output_path):
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-
 def render_worker(job_id, data, output_filename, output_path):
-    """Worker con control estricto de memoria RAM para planes de 512 MB."""
     with render_lock:
         print(f"\n================ [INICIO TRABAJO {job_id}] ================")
-        print(f"PAYLOAD RECIBIDO DE N8N: {data}")
-
         try:
             movie_data = data.get("movie", {})
             scenes = movie_data.get("scenes", [])
             valid_clip_files = []
 
-            if not scenes:
-                print("[ALERTA] La lista de escenas está vacía o el JSON no contiene la clave 'movie.scenes'")
-
             for idx, scene in enumerate(scenes):
                 video_url = scene.get("video_url")
                 audio_url = scene.get("audio_url")
 
-                print(f"\n--- Procesando Escena {idx} ---")
-                print(f"Video URL: {video_url}")
-                print(f"Audio URL: {audio_url}")
+                # Detectar si la URL es una imagen (.jpg, .png, pollinations)
+                is_image = any(ext in video_url.lower() for ext in ['.jpg', '.png', '.jpeg', 'pollinations'])
+                file_ext = ".jpg" if is_image else ".mp4"
 
-                raw_v = os.path.join(TEMP_DIR, f"{job_id}_raw_v_{idx}.mp4")
+                raw_v = os.path.join(TEMP_DIR, f"{job_id}_raw_v_{idx}{file_ext}")
                 raw_a = os.path.join(TEMP_DIR, f"{job_id}_raw_a_{idx}.mp3")
                 clip_out = os.path.join(TEMP_DIR, f"{job_id}_clip_{idx}.mp4")
 
@@ -119,42 +97,46 @@ def render_worker(job_id, data, output_filename, output_path):
                         download_file(video_url, raw_v)
                         download_file(audio_url, raw_a)
 
-                        size_v = os.path.getsize(raw_v) if os.path.exists(raw_v) else 0
-                        size_a = os.path.getsize(raw_a) if os.path.exists(raw_a) else 0
-                        print(f"Descargado -> Vídeo: {size_v} bytes | Audio: {size_a} bytes")
+                        if is_image:
+                            # Convierte la imagen IA en un clip de vídeo con efecto Zoom-In suave (Ken Burns)
+                            clip_cmd = [
+                                'ffmpeg', '-y',
+                                '-threads', '2',
+                                '-loop', '1',
+                                '-i', raw_v,
+                                '-i', raw_a,
+                                '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.0015,1.15)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920",
+                                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                                '-c:a', 'aac', '-b:a', '128k',
+                                '-shortest',
+                                clip_out
+                            ]
+                        else:
+                            # Caso vídeo mp4 estándar
+                            clip_cmd = [
+                                'ffmpeg', '-y',
+                                '-threads', '2',
+                                '-i', raw_v,
+                                '-i', raw_a,
+                                '-vf', "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1",
+                                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                                '-c:a', 'aac', '-b:a', '128k',
+                                '-shortest',
+                                clip_out
+                            ]
 
-                        if size_v < 10000 or size_a < 1000:
-                            print(f"[ERROR] Archivo pequeño/inválido en escena {idx}.")
-                            continue
-
-                        # FFmpeg optimizado para bajo consumo de RAM (-threads 2, -preset ultrafast)
-                        clip_cmd = [
-                            'ffmpeg', '-y',
-                            '-threads', '2',
-                            '-i', raw_v,
-                            '-i', raw_a,
-                            '-vf', VERTICAL_FILTER,
-                            '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
-                            '-c:a', 'aac', '-b:a', '128k',
-                            '-shortest',
-                            clip_out
-                        ]
                         res = subprocess.run(clip_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-                        # Limpieza inmediata de binarios raw para liberar espacio/RAM
                         if os.path.exists(raw_v): os.remove(raw_v)
                         if os.path.exists(raw_a): os.remove(raw_a)
 
-                        if res.returncode != 0:
-                            print(f"[FFmpeg ERROR escena {idx}]: {res.stderr}")
-                        else:
-                            print(f"Escena {idx} procesada correctamente.")
+                        if res.returncode == 0:
                             valid_clip_files.append(clip_out)
+                        else:
+                            print(f"[FFmpeg Error]: {res.stderr}")
 
                     except Exception as clip_err:
-                        print(f"[Excepción en escena {idx}]: {str(clip_err)}")
-                else:
-                    print(f"[ALERTA] Falta video_url o audio_url en la escena {idx}")
+                        print(f"[Error procesando escena {idx}]: {str(clip_err)}")
 
             if valid_clip_files:
                 concat_list_path = os.path.join(TEMP_DIR, f"{job_id}_concat.txt")
@@ -172,25 +154,20 @@ def render_worker(job_id, data, output_filename, output_path):
                 ]
                 subprocess.run(concat_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-                # Limpieza de clips intermedios
                 for clip in valid_clip_files:
                     if os.path.exists(clip): os.remove(clip)
                 if os.path.exists(concat_list_path): os.remove(concat_list_path)
 
-                print(f"\n================ [ÉXITO: VIDEO FINAL EN {output_path}] ================")
             else:
-                print("\n[FALLBACK] Ninguna escena se procesó correctamente. Generando vídeo sintético...")
                 build_fallback_video(output_path)
 
         except Exception as e:
-            print(f"[ERROR CRÍTICO en render_worker]: {str(e)}")
-            print(traceback.format_exc())
+            print(f"[ERROR]: {str(e)}")
             build_fallback_video(output_path)
 
         if not os.path.exists(output_path):
             build_fallback_video(output_path)
 
-        # Forzar liberación de memoria acumulada en Python
         gc.collect()
 
         public_url = f"https://innovax.onrender.com/assets/{output_filename}"
@@ -199,7 +176,6 @@ def render_worker(job_id, data, output_filename, output_path):
             "job_id": job_id,
             "public_url": public_url
         }
-
 
 @app.route('/render', methods=['POST'])
 def start_render():
@@ -220,7 +196,6 @@ def start_render():
 
     return jsonify(jobs_status[job_id]), 200
 
-
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
     job = jobs_status.get(job_id)
@@ -231,9 +206,7 @@ def get_status(job_id):
             "job_id": job_id,
             "public_url": public_url
         }), 200
-
     return jsonify(job), 200
-
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
