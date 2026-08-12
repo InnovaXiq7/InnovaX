@@ -9,13 +9,22 @@ from flask import Flask, jsonify, request, send_from_directory, send_file, Respo
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# Directorio temporal garantizado
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'innovax_renders')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 jobs_status = {}
 
 VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1"
+
+
+def download_file(url, destination_path):
+    """Descarga archivos HTTP/HTTPS incluyendo un User-Agent de navegador para evitar bloqueos 403."""
+    req = urllib.request.Request(
+        url, 
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    )
+    with urllib.request.urlopen(req, timeout=30) as response, open(destination_path, 'wb') as out_file:
+        out_file.write(response.read())
 
 
 @app.route('/')
@@ -25,19 +34,14 @@ def index():
 
 @app.route('/assets/<path:filename>', methods=['GET'])
 def serve_assets(filename):
-    """Servidor estático robusto: Busca en /tmp, assets/ o genera fallback si no existe."""
-    # 1. Comprobar si existe en TEMP_DIR
     temp_file_path = os.path.join(TEMP_DIR, filename)
     if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
         return send_file(temp_file_path, mimetype='video/mp4' if filename.endswith('.mp4') else 'audio/mpeg')
 
-    # 2. Comprobar si existe en la carpeta assets/ del repositorio
     local_asset_path = os.path.join('assets', filename)
     if os.path.exists(local_asset_path):
         return send_from_directory('assets', filename)
 
-    # 3. Fallback en tiempo real: Si n8n pide un MP4 que por cualquier motivo no existe en disco,
-    # generamos uno sintético al vuelo para responder 200 OK y evitar el error 404 en n8n
     if filename.endswith('.mp4'):
         fallback_path = os.path.join(TEMP_DIR, f"fallback_{filename}")
         if not os.path.exists(fallback_path):
@@ -62,7 +66,6 @@ def handle_tts():
 
 
 def build_fallback_video(output_path):
-    """Genera un MP4 sintético estándar de 1080x1920 válido."""
     cmd = [
         'ffmpeg', '-y',
         '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30:d=5',
@@ -76,7 +79,6 @@ def build_fallback_video(output_path):
 
 
 def render_worker(job_id, data, output_filename, output_path):
-    """Procesa el vídeo dinámico en segundo plano asegurando que el archivo final exista."""
     try:
         movie_data = data.get("movie", {})
         scenes = movie_data.get("scenes", [])
@@ -93,8 +95,9 @@ def render_worker(job_id, data, output_filename, output_path):
 
                 try:
                     if video_url and audio_url:
-                        urllib.request.urlretrieve(video_url, raw_v)
-                        urllib.request.urlretrieve(audio_url, raw_a)
+                        # Descarga robusta con Headers
+                        download_file(video_url, raw_v)
+                        download_file(audio_url, raw_a)
 
                         clip_cmd = [
                             'ffmpeg', '-y',
@@ -137,7 +140,6 @@ def render_worker(job_id, data, output_filename, output_path):
         except Exception:
             pass
 
-    # Asegurar que el archivo exista independientemente de cualquier fallo insospechado
     if not os.path.exists(output_path):
         build_fallback_video(output_path)
 
