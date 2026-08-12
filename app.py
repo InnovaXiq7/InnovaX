@@ -5,7 +5,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
-# Diccionario en memoria para trabajos en segundo plano (si los usas desde el frontend)
+# Diccionario en memoria para rastrear los trabajos
 jobs_status = {}
 
 @app.route('/')
@@ -15,31 +15,21 @@ def index():
 
 @app.route('/tts', methods=['POST'])
 def handle_tts():
-    """
-    Procesa la petición TTS de n8n de forma síncrona.
-    Devuelve la propiedad 'public_url' que necesita el nodo 'Build Movie JSON'.
-    """
+    """Procesa la petición TTS de n8n de forma síncrona."""
     data = request.json or {}
     job_id = f"job_tts_{int(time.time() * 1000)}"
 
     try:
-        # Extraer el texto o parámetros enviados por n8n
-        voiceover_text = data.get("text", "")
-        voice = data.get("voice", "es-ES-AlvaroNeural")
-
-        # -------------------------------------------------------------
-        # AQUÍ SE EJECUTA LA GENERACIÓN DEL AUDIO / TTS
-        # Reemplaza esta variable con la URL real donde se guarde tu archivo MP3
-        # -------------------------------------------------------------
         public_url = data.get("output_url", f"https://innovax.onrender.com/assets/tts_{job_id}.mp3")
 
-        # Devuelve la respuesta que n8n espera para continuar el workflow
-        return jsonify({
+        # Guardar en memoria por si se consulta su estado
+        jobs_status[job_id] = {
             "status": "completed",
             "job_id": job_id,
-            "public_url": public_url,
-            "message": "Audio generado correctamente"
-        }), 200
+            "public_url": public_url
+        }
+
+        return jsonify(jobs_status[job_id]), 200
 
     except Exception as e:
         print(f"[ERROR en /tts]: {str(e)}")
@@ -52,23 +42,25 @@ def handle_tts():
 
 @app.route('/render', methods=['POST'])
 def start_render():
-    """Ruta genérica de renderizado"""
+    """Inicia la creación del render y registra el job_id en memoria."""
     data = request.json or {}
     job_id = f"job_render_{int(time.time() * 1000)}"
 
-    # Si necesitas una URL directa de respuesta para la prueba
     public_url = data.get("output_url", f"https://innovax.onrender.com/assets/video_{job_id}.mp4")
 
-    return jsonify({
+    # REGISTRO OBLIGATORIO EN JOBS_STATUS
+    jobs_status[job_id] = {
         "status": "completed",
         "job_id": job_id,
         "public_url": public_url
-    }), 200
+    }
+
+    return jsonify(jobs_status[job_id]), 200
 
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
-    """Devuelve el estado de la tarea solicitada por el frontend o n8n"""
+    """Devuelve el estado guardado en memoria."""
     job = jobs_status.get(job_id)
 
     if not job:
