@@ -100,6 +100,7 @@ def clean_text(text):
 
 
 def get_audio_duration(file_path):
+    """Mide la duración exacta en segundos de un audio usando ffprobe."""
     try:
         cmd = [
             "ffprobe", "-v", "error",
@@ -283,22 +284,24 @@ def run_job(job_id, scenes):
                     voice_audio = job_dir / f"voice_{i}.mp3"
                     generate_tts(subtitle, voice, voice_audio)
 
+                # RE-SINCRONIZACIÓN DE SEGURIDAD
+                # Si tenemos el audio descargado o generado, recalcular la duración exacta antes de crear los subtítulos
                 if voice_audio and voice_audio.exists():
                     audio_dur = get_audio_duration(voice_audio)
                     if audio_dur:
                         duration = audio_dur
 
-                # 2. MUSICA
+                # 2. MÚSICA
                 if bg_music_url:
                     bg_audio = job_dir / f"bg_{i}.m4a"
                     download_audio(bg_music_url, bg_audio)
 
-                # 3. SUBTITULOS
+                # 3. SUBTÍTULOS (Ahora se crean usando la 'duration' exacta medida del MP3)
                 has_subtitles = False
                 if subtitle:
                     has_subtitles = create_ass_subtitles(subtitle, duration, ass_file)
 
-                # 4. FILTROS DE VIDEO (Scale + Crop + TikTok Subtitles)
+                # 4. FILTROS DE VÍDEO (Scale + Crop + TikTok Subtitles)
                 video_filter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30"
 
                 if has_subtitles:
@@ -437,7 +440,17 @@ def tts():
         generate_tts(text, voice, output_file)
         path = f"/files/audio/{filename}"
 
-        return jsonify(id=audio_id, voice=voice, url=path, public_url=public_url(path))
+        # Medir la duración exacta del audio generado
+        duration = get_audio_duration(output_file)
+
+        return jsonify(
+            id=audio_id, 
+            voice=voice, 
+            url=path, 
+            public_url=public_url(path),
+            duration=duration,          # Segundos devueltos en float (ej. 8.42)
+            audio_duration=duration    # Alias de compatibilidad
+        )
     except Exception as e:
         return jsonify(error=str(e)), 500
 
