@@ -8,6 +8,7 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
 import edge_tts
+from faster_whisper import WhisperModel
 
 
 app = Flask(__name__)
@@ -28,10 +29,10 @@ VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 JOBS = {}
 
 RENDER_LOCK = threading.Lock()
+WHISPER_LOCK = threading.Lock()
 
 # Máximo de subida: 1 GB
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
-
 
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL",
@@ -40,18 +41,67 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 # ============================================================
+# WHISPER
+# ============================================================
+
+WHISPER_MODEL_SIZE = os.environ.get(
+    "WHISPER_MODEL",
+    "base"
+)
+
+WHISPER_MODEL = None
+
+
+def get_whisper_model():
+
+    global WHISPER_MODEL
+
+    if WHISPER_MODEL is None:
+
+        with WHISPER_LOCK:
+
+            if WHISPER_MODEL is None:
+
+                print(
+                    f"[WHISPER] Cargando modelo: "
+                    f"{WHISPER_MODEL_SIZE}"
+                )
+
+                WHISPER_MODEL = WhisperModel(
+                    WHISPER_MODEL_SIZE,
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=2,
+                    num_workers=1
+                )
+
+                print(
+                    "[WHISPER] Modelo cargado correctamente"
+                )
+
+    return WHISPER_MODEL
+
+
+# ============================================================
 # URL PÚBLICA
 # ============================================================
 
 def public_url(path):
+
     base = PUBLIC_BASE_URL
 
     if not base:
-        hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+        hostname = os.environ.get(
+            "RENDER_EXTERNAL_HOSTNAME"
+        )
 
         if hostname:
+
             base = f"https://{hostname}"
+
         else:
+
             base = request.host_url.rstrip("/")
 
     return f"{base}{path}"
@@ -62,9 +112,11 @@ def public_url(path):
 # ============================================================
 
 def clean_job(job_id):
+
     job_dir = BASE / job_id
 
     if job_dir.exists():
+
         shutil.rmtree(
             job_dir,
             ignore_errors=True
@@ -75,9 +127,13 @@ def clean_job(job_id):
 # DESCARGAR AUDIO
 # ============================================================
 
-def download_audio(url, output_file):
+def download_audio(
+    url,
+    output_file
+):
 
     result = subprocess.run(
+
         [
             "ffmpeg",
             "-y",
@@ -92,8 +148,11 @@ def download_audio(url, output_file):
             "128k",
             str(output_file)
         ],
+
         stdout=subprocess.DEVNULL,
+
         stderr=subprocess.PIPE,
+
         text=True
     )
 
@@ -116,10 +175,15 @@ async def generate_tts_async(
 ):
 
     communicate = edge_tts.Communicate(
+
         text=text,
+
         voice=voice,
+
         rate="+0%",
+
         volume="+0%",
+
         pitch="+0Hz"
     )
 
@@ -135,9 +199,13 @@ def generate_tts(
 ):
 
     asyncio.run(
+
         generate_tts_async(
+
             text,
+
             voice,
+
             output_file
         )
     )
@@ -206,11 +274,12 @@ def run_job(
                     duration = 7
 
                 if duration < 1:
+
                     duration = 1
 
                 video_out = (
-                    job_dir
-                    / f"scene_{i}.mp4"
+                    job_dir /
+                    f"scene_{i}.mp4"
                 )
 
                 audio_out = None
@@ -222,8 +291,8 @@ def run_job(
                 if audio_url:
 
                     audio_out = (
-                        job_dir
-                        / f"audio_{i}.m4a"
+                        job_dir /
+                        f"audio_{i}.m4a"
                     )
 
                     download_audio(
@@ -339,15 +408,20 @@ def run_job(
                 # =================================================
 
                 result = subprocess.run(
+
                     command,
+
                     stdout=subprocess.DEVNULL,
+
                     stderr=subprocess.PIPE,
+
                     text=True
                 )
 
                 if result.returncode != 0:
 
                     raise RuntimeError(
+
                         f"Error rendering scene {i + 1}:\n"
                         f"{result.stderr[-4000:]}"
                     )
@@ -370,8 +444,8 @@ def run_job(
             # =================================================
 
             concat_file = (
-                job_dir
-                / "concat.txt"
+                job_dir /
+                "concat.txt"
             )
 
             concat_lines = []
@@ -388,8 +462,8 @@ def run_job(
             )
 
             final_file = (
-                job_dir
-                / "final.mp4"
+                job_dir /
+                "final.mp4"
             )
 
             concat_command = [
@@ -420,15 +494,20 @@ def run_job(
             ]
 
             result = subprocess.run(
+
                 concat_command,
+
                 stdout=subprocess.DEVNULL,
+
                 stderr=subprocess.PIPE,
+
                 text=True
             )
 
             if result.returncode != 0:
 
                 raise RuntimeError(
+
                     "Error concatenating scenes:\n"
                     + result.stderr[-4000:]
                 )
@@ -491,11 +570,15 @@ def health():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=6,
+        version=7,
 
         tts="edge-tts",
 
-        video_upload=True
+        video_upload=True,
+
+        transcription=True,
+
+        whisper_model=WHISPER_MODEL_SIZE
     )
 
 
@@ -512,11 +595,13 @@ def root():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=6,
+        version=7,
 
         tts="edge-tts",
 
-        video_upload=True
+        video_upload=True,
+
+        transcription=True
     )
 
 
@@ -564,8 +649,8 @@ def tts():
         )
 
         output_file = (
-            AUDIO_DIR
-            / filename
+            AUDIO_DIR /
+            filename
         )
 
         generate_tts(
@@ -638,8 +723,8 @@ def upload_audio():
         )
 
         output_file = (
-            AUDIO_DIR
-            / filename
+            AUDIO_DIR /
+            filename
         )
 
         audio.save(
@@ -669,7 +754,7 @@ def upload_audio():
 
 
 # ============================================================
-# NUEVO: UPLOAD VIDEO
+# UPLOAD VIDEO
 # ============================================================
 
 @app.post("/upload-video")
@@ -729,8 +814,8 @@ def upload_video():
         )
 
         output_file = (
-            VIDEO_DIR
-            / filename
+            VIDEO_DIR /
+            filename
         )
 
         video.save(
@@ -778,10 +863,12 @@ def upload_video():
 
 
 # ============================================================
-# SERVIR VIDEOS SUBIDOS
+# SERVIR VIDEOS
 # ============================================================
 
-@app.get("/files/video/<filename>")
+@app.get(
+    "/files/video/<filename>"
+)
 def video_file(filename):
 
     return send_from_directory(
@@ -792,6 +879,316 @@ def video_file(filename):
 
         as_attachment=False
     )
+
+
+# ============================================================
+# TRANSCRIBIR VIDEO CON WHISPER
+# ============================================================
+
+@app.post("/transcribe")
+def transcribe():
+
+    input_file = None
+
+    try:
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        video_url = (
+            data.get("video_url")
+            or
+            data.get("url")
+        )
+
+        if not video_url:
+
+            return jsonify(
+
+                ok=False,
+
+                error=(
+                    "Falta video_url."
+                )
+
+            ), 400
+
+        print(
+            "[WHISPER] Vídeo recibido:"
+        )
+
+        print(
+            video_url
+        )
+
+        temp_id = uuid.uuid4().hex
+
+        input_file = (
+            BASE /
+            f"transcribe_{temp_id}.wav"
+        )
+
+        # ====================================================
+        # EXTRAER AUDIO DEL VIDEO
+        # ====================================================
+
+        result = subprocess.run(
+
+            [
+
+                "ffmpeg",
+
+                "-y",
+
+                "-threads",
+                "1",
+
+                "-i",
+                video_url,
+
+                "-map",
+                "0:a:0?",
+
+                "-vn",
+
+                "-ac",
+                "1",
+
+                "-ar",
+                "16000",
+
+                "-c:a",
+                "pcm_s16le",
+
+                str(input_file)
+            ],
+
+            stdout=subprocess.DEVNULL,
+
+            stderr=subprocess.PIPE,
+
+            text=True
+        )
+
+        if result.returncode != 0:
+
+            raise RuntimeError(
+
+                "No se pudo extraer el audio "
+                "del vídeo:\n"
+                + result.stderr[-4000:]
+            )
+
+        if not input_file.exists():
+
+            raise RuntimeError(
+                "No se creó el archivo de audio."
+            )
+
+        # ====================================================
+        # WHISPER
+        # ====================================================
+
+        print(
+            "[WHISPER] Cargando modelo..."
+        )
+
+        model = get_whisper_model()
+
+        print(
+            "[WHISPER] Transcribiendo..."
+        )
+
+        segments, info = model.transcribe(
+
+            str(input_file),
+
+            language="es",
+
+            beam_size=5,
+
+            word_timestamps=True,
+
+            vad_filter=True,
+
+            condition_on_previous_text=True
+        )
+
+        output_segments = []
+
+        output_words = []
+
+        full_text = []
+
+        for segment in segments:
+
+            segment_text = (
+                segment.text
+                or ""
+            ).strip()
+
+            if segment_text:
+
+                full_text.append(
+                    segment_text
+                )
+
+            segment_words = []
+
+            if segment.words:
+
+                for word in segment.words:
+
+                    word_text = (
+                        word.word
+                        or ""
+                    ).strip()
+
+                    if not word_text:
+
+                        continue
+
+                    word_data = {
+
+                        "word": word_text,
+
+                        "start": round(
+                            float(
+                                word.start
+                            ),
+                            3
+                        ),
+
+                        "end": round(
+                            float(
+                                word.end
+                            ),
+                            3
+                        )
+                    }
+
+                    segment_words.append(
+                        word_data
+                    )
+
+                    output_words.append(
+                        word_data
+                    )
+
+            output_segments.append({
+
+                "start": round(
+                    float(
+                        segment.start
+                    ),
+                    3
+                ),
+
+                "end": round(
+                    float(
+                        segment.end
+                    ),
+                    3
+                ),
+
+                "text": segment_text,
+
+                "words": segment_words
+            })
+
+        # ====================================================
+        # LIMPIAR
+        # ====================================================
+
+        input_file.unlink(
+            missing_ok=True
+        )
+
+        # ====================================================
+        # RESULTADO
+        # ====================================================
+
+        detected_language = (
+            info.language
+            if info
+            else "es"
+        )
+
+        language_probability = None
+
+        if info:
+
+            try:
+
+                language_probability = round(
+
+                    float(
+                        info.language_probability
+                    ),
+
+                    4
+                )
+
+            except Exception:
+
+                language_probability = None
+
+        print(
+            "[WHISPER] Transcripción terminada."
+        )
+
+        return jsonify({
+
+            "ok": True,
+
+            "language":
+                detected_language,
+
+            "language_probability":
+                language_probability,
+
+            "text":
+                " ".join(
+                    full_text
+                ),
+
+            "segments":
+                output_segments,
+
+            "words":
+                output_words
+        })
+
+    except Exception as e:
+
+        print(
+            "[WHISPER ERROR]"
+        )
+
+        print(
+            str(e)
+        )
+
+        if input_file:
+
+            try:
+
+                input_file.unlink(
+                    missing_ok=True
+                )
+
+            except Exception:
+
+                pass
+
+        return jsonify(
+
+            ok=False,
+
+            error=str(e)
+
+        ), 500
 
 
 # ============================================================
@@ -850,13 +1247,17 @@ def render():
 
     JOBS[job_id] = {
 
-        "id": job_id,
+        "id":
+            job_id,
 
-        "status": "queued",
+        "status":
+            "queued",
 
-        "url": None,
+        "url":
+            None,
 
-        "error": None
+        "error":
+            None
     }
 
     normalized = []
@@ -869,6 +1270,7 @@ def render():
             scene,
             dict
         ):
+
             continue
 
         src = (
@@ -890,13 +1292,17 @@ def render():
 
         normalized.append({
 
-            "index": index,
+            "index":
+                index,
 
-            "video_url": src,
+            "video_url":
+                src,
 
-            "audio_url": audio_url,
+            "audio_url":
+                audio_url,
 
-            "duration": duration
+            "duration":
+                duration
         })
 
     if not normalized:
@@ -934,7 +1340,9 @@ def render():
 # STATUS
 # ============================================================
 
-@app.get("/status/<job_id>")
+@app.get(
+    "/status/<job_id>"
+)
 def status(job_id):
 
     job = JOBS.get(
@@ -1009,6 +1417,8 @@ def request_entity_too_large(error):
 
     return jsonify(
 
+        ok=False,
+
         error=(
             "El archivo supera "
             "el límite máximo de 1 GB."
@@ -1024,6 +1434,7 @@ def request_entity_too_large(error):
 if __name__ == "__main__":
 
     port = int(
+
         os.environ.get(
             "PORT",
             10000
