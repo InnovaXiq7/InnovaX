@@ -13,6 +13,7 @@ from faster_whisper import WhisperModel
 
 app = Flask(__name__)
 
+
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
@@ -31,7 +32,7 @@ JOBS = {}
 RENDER_LOCK = threading.Lock()
 WHISPER_LOCK = threading.Lock()
 
-# Máximo de subida: 1 GB
+# Límite de subida: 1 GB
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 
 PUBLIC_BASE_URL = os.environ.get(
@@ -41,12 +42,14 @@ PUBLIC_BASE_URL = os.environ.get(
 
 
 # ============================================================
-# WHISPER
+# WHISPER - CONFIGURACIÓN LIGERA PARA RENDER FREE
 # ============================================================
 
+# IMPORTANTE:
+# tiny consume mucha menos RAM que base.
 WHISPER_MODEL_SIZE = os.environ.get(
     "WHISPER_MODEL",
-    "base"
+    "tiny"
 )
 
 WHISPER_MODEL = None
@@ -63,7 +66,7 @@ def get_whisper_model():
             if WHISPER_MODEL is None:
 
                 print(
-                    f"[WHISPER] Cargando modelo: "
+                    f"[WHISPER] Cargando modelo ligero: "
                     f"{WHISPER_MODEL_SIZE}"
                 )
 
@@ -71,7 +74,7 @@ def get_whisper_model():
                     WHISPER_MODEL_SIZE,
                     device="cpu",
                     compute_type="int8",
-                    cpu_threads=2,
+                    cpu_threads=1,
                     num_workers=1
                 )
 
@@ -124,7 +127,31 @@ def clean_job(job_id):
 
 
 # ============================================================
-# DESCARGAR AUDIO
+# LIMPIAR ARCHIVOS TEMPORALES ANTIGUOS
+# ============================================================
+
+def cleanup_old_files():
+
+    try:
+
+        # Limpiar WAV temporales
+        for file in BASE.glob("transcribe_*.wav"):
+
+            try:
+                file.unlink()
+            except Exception:
+                pass
+
+    except Exception as e:
+
+        print(
+            "[CLEANUP ERROR]",
+            str(e)
+        )
+
+
+# ============================================================
+# DESCARGAR / EXTRAER AUDIO
 # ============================================================
 
 def download_audio(
@@ -145,7 +172,7 @@ def download_audio(
             "-c:a",
             "aac",
             "-b:a",
-            "128k",
+            "96k",
             str(output_file)
         ],
 
@@ -274,7 +301,6 @@ def run_job(
                     duration = 7
 
                 if duration < 1:
-
                     duration = 1
 
                 video_out = (
@@ -346,7 +372,7 @@ def run_job(
                         "aac",
 
                         "-b:a",
-                        "128k",
+                        "96k",
 
                         "-shortest",
 
@@ -407,6 +433,10 @@ def run_job(
                 # EJECUTAR FFMPEG
                 # =================================================
 
+                print(
+                    f"[RENDER] Procesando escena {i + 1}"
+                )
+
                 result = subprocess.run(
 
                     command,
@@ -424,6 +454,12 @@ def run_job(
 
                         f"Error rendering scene {i + 1}:\n"
                         f"{result.stderr[-4000:]}"
+                    )
+
+                if not video_out.exists():
+
+                    raise RuntimeError(
+                        f"No se creó la escena {i + 1}"
                     )
 
                 inputs.append(
@@ -512,6 +548,12 @@ def run_job(
                     + result.stderr[-4000:]
                 )
 
+            if not final_file.exists():
+
+                raise RuntimeError(
+                    "El vídeo final no fue creado."
+                )
+
             # =================================================
             # JOB COMPLETADO
             # =================================================
@@ -529,8 +571,12 @@ def run_job(
                 )
             )
 
+            print(
+                f"[RENDER] Job completado: {job_id}"
+            )
+
             # =================================================
-            # LIMPIEZA
+            # LIMPIEZA DE ESCENAS
             # =================================================
 
             for video_file in inputs:
@@ -544,6 +590,14 @@ def run_job(
             )
 
         except Exception as e:
+
+            print(
+                f"[RENDER ERROR] {job_id}"
+            )
+
+            print(
+                str(e)
+            )
 
             JOBS[job_id].update(
 
@@ -570,7 +624,7 @@ def health():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=8,
+        version=9,
 
         tts="edge-tts",
 
@@ -595,13 +649,15 @@ def root():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=8,
+        version=9,
 
         tts="edge-tts",
 
         video_upload=True,
 
-        transcription=True
+        transcription=True,
+
+        whisper_model=WHISPER_MODEL_SIZE
     )
 
 
@@ -892,6 +948,8 @@ def transcribe():
 
     try:
 
+        cleanup_old_files()
+
         data = request.get_json(
             silent=True
         ) or {}
@@ -903,7 +961,7 @@ def transcribe():
         )
 
         # ====================================================
-        # LIMPIAR URL RECIBIDA
+        # LIMPIAR URL
         # ====================================================
 
         if video_url:
@@ -912,8 +970,6 @@ def transcribe():
                 video_url
             ).strip()
 
-            # n8n puede mandar accidentalmente:
-            # =https://...
             if video_url.startswith("="):
 
                 video_url = (
@@ -921,7 +977,6 @@ def transcribe():
                     .strip()
                 )
 
-            # Eliminar comillas si llegan
             if (
                 len(video_url) >= 2
                 and
@@ -951,9 +1006,7 @@ def transcribe():
 
                 ok=False,
 
-                error=(
-                    "Falta video_url."
-                )
+                error="Falta video_url."
 
             ), 400
 
@@ -970,13 +1023,9 @@ def transcribe():
         # ====================================================
 
         if not (
-            video_url.startswith(
-                "http://"
-            )
+            video_url.startswith("http://")
             or
-            video_url.startswith(
-                "https://"
-            )
+            video_url.startswith("https://")
         ):
 
             raise ValueError(
@@ -985,7 +1034,7 @@ def transcribe():
             )
 
         # ====================================================
-        # ARCHIVO TEMPORAL
+        # TEMPORAL
         # ====================================================
 
         temp_id = uuid.uuid4().hex
@@ -1032,6 +1081,7 @@ def transcribe():
                 "pcm_s16le",
 
                 str(input_file)
+
             ],
 
             stdout=subprocess.DEVNULL,
@@ -1061,7 +1111,7 @@ def transcribe():
         # ====================================================
 
         print(
-            "[WHISPER] Cargando modelo..."
+            "[WHISPER] Cargando modelo ligero..."
         )
 
         model = get_whisper_model()
@@ -1076,13 +1126,13 @@ def transcribe():
 
             language="es",
 
-            beam_size=5,
+            beam_size=1,
 
             word_timestamps=True,
 
             vad_filter=True,
 
-            condition_on_previous_text=True
+            condition_on_previous_text=False
         )
 
         output_segments = []
@@ -1121,21 +1171,24 @@ def transcribe():
 
                     word_data = {
 
-                        "word": word_text,
+                        "word":
+                            word_text,
 
-                        "start": round(
-                            float(
-                                word.start
+                        "start":
+                            round(
+                                float(
+                                    word.start
+                                ),
+                                3
                             ),
-                            3
-                        ),
 
-                        "end": round(
-                            float(
-                                word.end
-                            ),
-                            3
-                        )
+                        "end":
+                            round(
+                                float(
+                                    word.end
+                                ),
+                                3
+                            )
                     }
 
                     segment_words.append(
@@ -1148,27 +1201,31 @@ def transcribe():
 
             output_segments.append({
 
-                "start": round(
-                    float(
-                        segment.start
+                "start":
+                    round(
+                        float(
+                            segment.start
+                        ),
+                        3
                     ),
-                    3
-                ),
 
-                "end": round(
-                    float(
-                        segment.end
+                "end":
+                    round(
+                        float(
+                            segment.end
+                        ),
+                        3
                     ),
-                    3
-                ),
 
-                "text": segment_text,
+                "text":
+                    segment_text,
 
-                "words": segment_words
+                "words":
+                    segment_words
             })
 
         # ====================================================
-        # LIMPIAR AUDIO TEMPORAL
+        # LIMPIAR WAV
         # ====================================================
 
         input_file.unlink(
@@ -1176,7 +1233,7 @@ def transcribe():
         )
 
         # ====================================================
-        # INFORMACIÓN DEL IDIOMA
+        # IDIOMA
         # ====================================================
 
         detected_language = (
