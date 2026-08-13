@@ -11,12 +11,12 @@ app = Flask(__name__)
 TEMP_DIR = "/tmp/render_assets"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Memoria temporal para estados si los usas
+# Memoria temporal para estados de reserva
 render_jobs = {}
 
 
 def download_file_stream(url, output_path):
-    """Descarga usando streams para no saturar los 512 MB de RAM."""
+    """Descarga usando streams en bloques de 1MB para no saturar los 512 MB de RAM."""
     import requests
 
     with requests.get(url, stream=True, timeout=60) as r:
@@ -28,7 +28,7 @@ def download_file_stream(url, output_path):
 
 
 def cleanup_temp_files():
-    """Limpia archivos temporales y fuerza liberación de RAM."""
+    """Limpia archivos temporales y fuerza la liberación de RAM mediante el GC."""
     for file in os.listdir(TEMP_DIR):
         file_path = os.path.join(TEMP_DIR, file)
         try:
@@ -79,41 +79,68 @@ def generate_tts():
 @app.route("/render", methods=["POST"])
 def render_video():
     data = request.json or {}
-    video_urls = data.get("video_urls", [])
-    audio_url = data.get("audio_url", None)
+    raw_video_urls = data.get("video_urls", [])
+    raw_audio_url = data.get("audio_url", None)
 
-    if not video_urls:
+    if not raw_video_urls:
         return (
             jsonify({"status": "error", "message": "No video_urls provided"}),
             400,
         )
 
+    # Sanear las URLs de vídeo (elimina '=' o espacios iniciales colados por n8n)
+    video_urls = []
+    if isinstance(raw_video_urls, list):
+        for url in raw_video_urls:
+            if isinstance(url, str):
+                clean_u = url.lstrip("=").strip()
+                if clean_u.startswith("http"):
+                    video_urls.append(clean_u)
+    elif isinstance(raw_video_urls, str):
+        clean_u = raw_video_urls.lstrip("=").strip()
+        if clean_u.startswith("http"):
+            video_urls.append(clean_u)
+
+    if not video_urls:
+        return (
+            jsonify({"status": "error", "message": "No valid video HTTP URLs provided"}),
+            400,
+        )
+
+    # Sanear la URL del audio
+    audio_url = None
+    if isinstance(raw_audio_url, str):
+        clean_a = raw_audio_url.lstrip("=").strip()
+        if clean_a.startswith("http"):
+            audio_url = clean_a
+
     output_filename = "output_final.mp4"
     output_render_path = os.path.join(TEMP_DIR, output_filename)
 
     try:
-        # Limpieza inicial
+        # Limpieza previa de memoria y disco
         cleanup_temp_files()
 
-        # Descarga de clips por stream
+        # Descarga de vídeos por stream
         downloaded_videos = []
         for i, url in enumerate(video_urls):
             path = os.path.join(TEMP_DIR, f"clip_{i}.mp4")
             download_file_stream(url, path)
             downloaded_videos.append(path)
 
-        # Descarga de audio si viene especificado
+        # Descarga de audio si existe una URL válida
+        audio_path = None
         if audio_url:
             audio_path = os.path.join(TEMP_DIR, "audio.mp3")
             download_file_stream(audio_url, audio_path)
 
-        # Crear lista de concat
+        # Archivo de concatenación para FFmpeg
         concat_file_path = os.path.join(TEMP_DIR, "files.txt")
         with open(concat_file_path, "w") as f:
             for vid in downloaded_videos:
                 f.write(f"file '{vid}'\n")
 
-        # FFmpeg Ultra Optimizado (1 Hilo de CPU para no superar 512MB RAM)
+        # Construcción dinámica del comando FFmpeg
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
@@ -123,22 +150,34 @@ def render_video():
             "0",
             "-i",
             concat_file_path,
-            "-threads",
-            "1",
-            "-preset",
-            "ultrafast",
-            "-vf",
-            "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-            "-c:v",
-            "libx264",
-            "-maxrate",
-            "2.5M",
-            "-bufsize",
-            "5M",
-            "-pix_fmt",
-            "yuv420p",
-            output_render_path,
         ]
+
+        if audio_path:
+            ffmpeg_cmd.extend(["-i", audio_path, "-map", "0:v", "-map", "1:a"])
+
+        # Parámetros optimizados para no superar 512 MB RAM (1 hilo, preset ultrafast)
+        ffmpeg_cmd.extend(
+            [
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-vf",
+                "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-maxrate",
+                "2.5M",
+                "-bufsize",
+                "5M",
+                "-pix_fmt",
+                "yuv420p",
+                "-shortest",
+                output_render_path,
+            ]
+        )
 
         process = subprocess.run(
             ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
