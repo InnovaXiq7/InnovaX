@@ -37,34 +37,48 @@ def async_render_process(job_id, video_urls, audio_url, host_url):
     output_render_path = os.path.join(TEMP_DIR, output_filename)
 
     try:
-        render_jobs[job_id] = {"status": "processing", "message": "Descargando recursos..."}
+        render_jobs[job_id] = {
+            "status": "processing",
+            "message": "Descargando recursos...",
+            "id": job_id
+        }
 
-        # 1. Descargar vídeos
+        # 1. Descargar vídeos de Pixabay
         downloaded_videos = []
         for i, url in enumerate(video_urls):
             path = os.path.join(TEMP_DIR, f"clip_{job_id}_{i}.mp4")
             download_file_stream(url, path)
             downloaded_videos.append(path)
 
-        # 2. Obtener audio
+        # 2. Manejo de Audio (Prioriza el archivo local si ya se generó vía TTS)
         audio_path = None
-        if audio_url:
-            local_audio = os.path.join(TEMP_DIR, "audio.mp3")
-            if os.path.exists(local_audio):
-                audio_path = local_audio
-            else:
-                audio_path = os.path.join(TEMP_DIR, f"audio_{job_id}.mp3")
-                download_file_stream(audio_url, audio_path)
+        local_audio = os.path.join(TEMP_DIR, "audio.mp3")
 
-        # 3. Preparar concatenación
+        if os.path.exists(local_audio):
+            # Usar directamente el audio.mp3 local sin hacer HTTP GET a sí mismo
+            audio_path = local_audio
+        elif audio_url:
+            # Descargar si viene una URL externa o si no estaba en local
+            audio_path = os.path.join(TEMP_DIR, f"audio_{job_id}.mp3")
+            try:
+                download_file_stream(audio_url, audio_path)
+            except Exception as audio_err:
+                print(f"Error descargando audio desde {audio_url}: {audio_err}")
+                audio_path = None
+
+        # 3. Preparar concatenación para FFmpeg
         concat_file_path = os.path.join(TEMP_DIR, f"files_{job_id}.txt")
         with open(concat_file_path, "w", encoding="utf-8") as f:
             for vid in downloaded_videos:
                 f.write(f"file '{vid}'\n")
 
-        render_jobs[job_id] = {"status": "processing", "message": "Codificando vídeo con FFmpeg..."}
+        render_jobs[job_id] = {
+            "status": "processing",
+            "message": "Codificando vídeo con FFmpeg...",
+            "id": job_id
+        }
 
-        # 4. Comando FFmpeg ultrarrápido
+        # 4. Comando FFmpeg optimizado
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-thread_queue_size", "16",
@@ -93,7 +107,7 @@ def async_render_process(job_id, video_urls, audio_url, host_url):
 
         process = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # Limpieza de archivos intermedios
+        # Limpieza de archivos temporales de los clips generados
         for clip in downloaded_videos:
             if os.path.exists(clip):
                 try: os.remove(clip)
@@ -108,18 +122,24 @@ def async_render_process(job_id, video_urls, audio_url, host_url):
             render_jobs[job_id] = {
                 "status": "error",
                 "message": "Error en FFmpeg",
-                "details": error_log[-300:]
+                "details": error_log[-300:],
+                "id": job_id
             }
         else:
             download_url = f"{host_url}/download/{output_filename}"
             render_jobs[job_id] = {
                 "status": "done",
                 "message": "Render completado con éxito",
-                "url": download_url
+                "url": download_url,
+                "id": job_id
             }
 
     except Exception as e:
-        render_jobs[job_id] = {"status": "error", "message": str(e)}
+        render_jobs[job_id] = {
+            "status": "error",
+            "message": str(e),
+            "id": job_id
+        }
 
 
 @app.route("/tts", methods=["POST"])
@@ -180,14 +200,14 @@ def render_video():
     job_id = str(uuid.uuid4())[:8]
     host_url = request.host_url.rstrip('/').replace("http://", "https://")
 
-    # Iniciar procesamiento en un hilo independiente
+    # Iniciar procesamiento en segundo plano
     thread = threading.Thread(
         target=async_render_process,
         args=(job_id, video_urls, audio_url, host_url)
     )
     thread.start()
 
-    # Responder INMEDIATAMENTE para evitar el 504 Gateway Timeout de Render
+    # Responder de inmediato para evitar el timeout de Render
     return jsonify({
         "status": "processing",
         "id": job_id,
