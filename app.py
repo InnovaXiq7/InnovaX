@@ -27,9 +27,13 @@ def download_file_stream(url, output_path):
                     f.write(chunk)
 
 
-def cleanup_temp_files():
-    """Limpia archivos temporales y fuerza la liberación de RAM mediante el GC."""
+def cleanup_temp_files(keep_audio=True):
+    """Limpia clips y renders antiguos sin borrar el audio generado por el TTS."""
     for file in os.listdir(TEMP_DIR):
+        # Si keep_audio es True, preservamos audio.mp3 para que no de 404
+        if keep_audio and file == "audio.mp3":
+            continue
+            
         file_path = os.path.join(TEMP_DIR, file)
         try:
             if os.path.isfile(file_path):
@@ -61,7 +65,7 @@ def generate_tts():
     try:
         asyncio.run(_generate())
 
-        host_url = request.host_url.rstrip("/")
+        host_url = request.host_url.rstrip("/").replace("http://", "https://")
         return jsonify(
             {
                 "status": "success",
@@ -118,8 +122,8 @@ def render_video():
     output_render_path = os.path.join(TEMP_DIR, output_filename)
 
     try:
-        # Limpieza previa de memoria y disco
-        cleanup_temp_files()
+        # Limpieza previa de clips/renders sin borrar audio.mp3
+        cleanup_temp_files(keep_audio=True)
 
         # Descarga de vídeos por stream
         downloaded_videos = []
@@ -128,11 +132,16 @@ def render_video():
             download_file_stream(url, path)
             downloaded_videos.append(path)
 
-        # Descarga de audio si existe una URL válida
+        # Manejo del audio
         audio_path = None
         if audio_url:
-            audio_path = os.path.join(TEMP_DIR, "audio.mp3")
-            download_file_stream(audio_url, audio_path)
+            local_audio = os.path.join(TEMP_DIR, "audio.mp3")
+            # Si el audio ya existe localmente en el servidor, lo usamos directamente sin redescargar
+            if os.path.exists(local_audio):
+                audio_path = local_audio
+            else:
+                audio_path = local_audio
+                download_file_stream(audio_url, audio_path)
 
         # Archivo de concatenación para FFmpeg
         concat_file_path = os.path.join(TEMP_DIR, "files.txt")
@@ -152,7 +161,7 @@ def render_video():
             concat_file_path,
         ]
 
-        if audio_path:
+        if audio_path and os.path.exists(audio_path):
             ffmpeg_cmd.extend(["-i", audio_path, "-map", "0:v", "-map", "1:a"])
 
         # Parámetros optimizados para no superar 512 MB RAM (1 hilo, preset ultrafast)
@@ -196,7 +205,7 @@ def render_video():
                 500,
             )
 
-        host_url = request.host_url.rstrip("/")
+        host_url = request.host_url.rstrip("/").replace("http://", "https://")
         download_url = f"{host_url}/download/{output_filename}"
 
         return jsonify(
