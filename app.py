@@ -293,9 +293,9 @@ def run_job(
                         "-vf",
 
                         (
-                            "scale=720:1280:"
+                            "scale=1080:1920:"
                             "force_original_aspect_ratio=increase,"
-                            "crop=720:1280,"
+                            "crop=1080:1920,"
                             "fps=24"
                         ),
 
@@ -352,9 +352,9 @@ def run_job(
                         "-vf",
 
                         (
-                            "scale=720:1280:"
+                            "scale=1080:1920:"
                             "force_original_aspect_ratio=increase,"
-                            "crop=720:1280,"
+                            "crop=1080:1920,"
                             "fps=24"
                         ),
 
