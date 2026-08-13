@@ -30,10 +30,9 @@ def download_file_stream(url, output_path):
 def cleanup_temp_files(keep_audio=True):
     """Limpia clips y renders antiguos sin borrar el audio generado por el TTS."""
     for file in os.listdir(TEMP_DIR):
-        # Si keep_audio es True, preservamos audio.mp3 para que no de 404
         if keep_audio and file == "audio.mp3":
             continue
-            
+
         file_path = os.path.join(TEMP_DIR, file)
         try:
             if os.path.isfile(file_path):
@@ -77,7 +76,7 @@ def generate_tts():
 
 
 # ==========================================
-# ENDPOINT 2: Renderizado de Vídeo
+# ENDPOINT 2: Renderizado de Vídeo (Ultra Low Memory)
 # URL en n8n: https://innovax.onrender.com/render
 # ==========================================
 @app.route("/render", methods=["POST"])
@@ -92,11 +91,9 @@ def render_video():
             400,
         )
 
-    # Si n8n lo envía como un string separado por comas, lo convertimos en lista
     if isinstance(raw_video_urls, str):
         raw_video_urls = raw_video_urls.split(",")
 
-    # Sanear las URLs de vídeo (elimina '=' o espacios sobrantes)
     video_urls = []
     if isinstance(raw_video_urls, list):
         for url in raw_video_urls:
@@ -107,11 +104,15 @@ def render_video():
 
     if not video_urls:
         return (
-            jsonify({"status": "error", "message": "No valid video HTTP URLs provided"}),
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "No valid video HTTP URLs provided",
+                }
+            ),
             400,
         )
 
-    # Sanear la URL del audio
     audio_url = None
     if isinstance(raw_audio_url, str):
         clean_a = raw_audio_url.lstrip("=").strip()
@@ -122,37 +123,39 @@ def render_video():
     output_render_path = os.path.join(TEMP_DIR, output_filename)
 
     try:
-        # Limpieza previa de clips/renders sin borrar audio.mp3
+        # 1. Limpieza de memoria previa manteniendo audio.mp3
         cleanup_temp_files(keep_audio=True)
+        gc.collect()
 
-        # Descarga de vídeos por stream
+        # 2. Descargar vídeos por stream
         downloaded_videos = []
         for i, url in enumerate(video_urls):
             path = os.path.join(TEMP_DIR, f"clip_{i}.mp4")
             download_file_stream(url, path)
             downloaded_videos.append(path)
 
-        # Manejo del audio
+        # 3. Preparar audio
         audio_path = None
         if audio_url:
             local_audio = os.path.join(TEMP_DIR, "audio.mp3")
-            # Si el audio ya existe localmente en el servidor, lo usamos directamente sin redescargar
             if os.path.exists(local_audio):
                 audio_path = local_audio
             else:
                 audio_path = local_audio
                 download_file_stream(audio_url, audio_path)
 
-        # Archivo de concatenación para FFmpeg
+        # 4. Archivo de lista para concat
         concat_file_path = os.path.join(TEMP_DIR, "files.txt")
         with open(concat_file_path, "w") as f:
             for vid in downloaded_videos:
                 f.write(f"file '{vid}'\n")
 
-        # Construcción dinámica del comando FFmpeg
+        # 5. Comando FFmpeg optimizado para < 250 MB de RAM
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
+            "-thread_queue_size",
+            "16",
             "-f",
             "concat",
             "-safe",
@@ -164,23 +167,26 @@ def render_video():
         if audio_path and os.path.exists(audio_path):
             ffmpeg_cmd.extend(["-i", audio_path, "-map", "0:v", "-map", "1:a"])
 
-        # Parámetros optimizados para no superar 512 MB RAM (1 hilo, preset ultrafast)
         ffmpeg_cmd.extend(
             [
                 "-threads",
                 "1",
                 "-preset",
                 "ultrafast",
+                "-tune",
+                "zerolatency",
                 "-vf",
-                "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-ih)/2:(oh-ih)/2",
                 "-c:v",
                 "libx264",
                 "-c:a",
                 "aac",
+                "-b:v",
+                "1500k",
                 "-maxrate",
-                "2.5M",
+                "1500k",
                 "-bufsize",
-                "5M",
+                "3000k",
                 "-pix_fmt",
                 "yuv420p",
                 "-shortest",
@@ -191,6 +197,15 @@ def render_video():
         process = subprocess.run(
             ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
+
+        # Limpieza de clips sueltos tras procesar
+        for clip in downloaded_videos:
+            if os.path.exists(clip):
+                try:
+                    os.remove(clip)
+                except Exception:
+                    pass
+        gc.collect()
 
         if process.returncode != 0:
             error_log = process.stderr.decode("utf-8")
