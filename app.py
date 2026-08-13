@@ -88,7 +88,11 @@ def render_video():
             400,
         )
 
-    # Sanear las URLs de vídeo (elimina '=' o espacios iniciales colados por n8n)
+    # Si n8n lo envía como un string separado por comas, lo convertimos en lista
+    if isinstance(raw_video_urls, str):
+        raw_video_urls = raw_video_urls.split(",")
+
+    # Sanear las URLs de vídeo (elimina '=' o espacios sobrantes)
     video_urls = []
     if isinstance(raw_video_urls, list):
         for url in raw_video_urls:
@@ -96,10 +100,6 @@ def render_video():
                 clean_u = url.lstrip("=").strip()
                 if clean_u.startswith("http"):
                     video_urls.append(clean_u)
-    elif isinstance(raw_video_urls, str):
-        clean_u = raw_video_urls.lstrip("=").strip()
-        if clean_u.startswith("http"):
-            video_urls.append(clean_u)
 
     if not video_urls:
         return (
