@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
@@ -14,12 +15,24 @@ AUDIO_DIR = BASE / "audio"
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_DIR = BASE / "video"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_FILE = BASE / "jobs.json"
 
-JOBS = {}
+def load_jobs():
+    if JOBS_FILE.exists():
+        try:
+            with open(JOBS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_jobs(jobs):
+    with open(JOBS_FILE, "w") as f:
+        json.dump(jobs, f)
 
 @app.route('/')
 def home():
-    return jsonify(status="Innovax API Online", version="stable-1.0")
+    return jsonify(status="Innovax API Online", version="stable-persistent-1.0")
 
 @app.post("/tts")
 def tts():
@@ -29,7 +42,6 @@ def tts():
     audio_id = uuid.uuid4().hex
     output_file = AUDIO_DIR / f"{audio_id}.mp3"
     
-    # Ejecutamos edge_tts de forma síncrona compatible con Flask estándar
     async def _generate():
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(str(output_file))
@@ -42,13 +54,17 @@ def tts():
 def render():
     data = request.get_json() or {}
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "succeeded"}
-    # IMPORTANTE: Devolvemos el 'id' para que n8n pueda capturarlo y descargar el MP4
+    
+    jobs = load_jobs()
+    jobs[job_id] = {"status": "succeeded"}
+    save_jobs(jobs)
+    
     return jsonify(id=job_id, status="succeeded")
 
 @app.get("/status/<job_id>")
 def status(job_id):
-    job = JOBS.get(job_id)
+    jobs = load_jobs()
+    job = jobs.get(job_id)
     if not job:
         return jsonify(error="No render was found with that ID"), 404
     return jsonify(job)
