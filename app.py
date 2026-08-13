@@ -7,7 +7,7 @@ import asyncio
 
 app = Flask(__name__)
 
-# Configuración
+# Configuración de directorios temporales
 BASE = Path("/tmp/innovax")
 BASE.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR = BASE / "audio"
@@ -29,7 +29,7 @@ def tts():
     audio_id = uuid.uuid4().hex
     output_file = AUDIO_DIR / f"{audio_id}.mp3"
     
-    # Ejecutamos edge_tts de forma síncrona para evitar el error de Flask
+    # Ejecutamos edge_tts de forma síncrona compatible con Flask estándar
     async def _generate():
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(str(output_file))
@@ -43,6 +43,7 @@ def render():
     data = request.get_json() or {}
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "succeeded"}
+    # IMPORTANTE: Devolvemos el 'id' para que n8n pueda capturarlo y descargar el MP4
     return jsonify(id=job_id, status="succeeded")
 
 @app.get("/status/<job_id>")
@@ -55,7 +56,8 @@ def status(job_id):
 @app.post("/upload-video")
 def upload_video():
     video = request.files.get("file")
-    if not video: return jsonify(error="No file"), 400
+    if not video: 
+        return jsonify(error="No file"), 400
     video_id = uuid.uuid4().hex
     path = VIDEO_DIR / f"{video_id}.mp4"
     video.save(path)
