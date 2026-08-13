@@ -39,6 +39,23 @@ PUBLIC_BASE_URL = os.environ.get(
     "https://innovax.onrender.com"
 ).rstrip("/")
 
+# ============================================================
+# MÚSICA DE FONDO
+# ============================================================
+
+# El archivo está en:
+# assets/ssstik.io_1786530745642.mp3
+
+MUSIC_FILE = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "ssstik.io_1786530745642.mp3"
+)
+
+# Volumen de la música.
+# 0.12 = 12%
+MUSIC_VOLUME = 0.12
+
 
 # ============================================================
 # WHISPER
@@ -53,7 +70,6 @@ WHISPER_MODEL = None
 
 
 def get_whisper_model():
-
     global WHISPER_MODEL
 
     if WHISPER_MODEL is None:
@@ -93,15 +109,16 @@ def public_url(path):
 
     path = str(path).strip()
 
-    # Quitar = accidental
     if path.startswith("="):
         path = path[1:].strip()
 
-    # Ya es URL completa
-    if path.startswith("http://") or path.startswith("https://"):
+    if (
+        path.startswith("http://")
+        or
+        path.startswith("https://")
+    ):
         return path
 
-    # URL relativa
     if not path.startswith("/"):
         path = "/" + path
 
@@ -119,17 +136,23 @@ def normalize_url(value):
 
     value = str(value).strip()
 
-    # Quitar =
     if value.startswith("="):
         value = value[1:].strip()
 
-    # Quitar comillas
     if len(value) >= 2:
 
         if (
-            (value.startswith('"') and value.endswith('"'))
+            (
+                value.startswith('"')
+                and
+                value.endswith('"')
+            )
             or
-            (value.startswith("'") and value.endswith("'"))
+            (
+                value.startswith("'")
+                and
+                value.endswith("'")
+            )
         ):
 
             value = value[1:-1].strip()
@@ -146,6 +169,7 @@ def download_file(url, output_file):
     url = normalize_url(url)
 
     if not url:
+
         raise ValueError(
             "URL vacía."
         )
@@ -190,7 +214,6 @@ def download_file(url, output_file):
             ):
 
                 if chunk:
-
                     f.write(chunk)
 
     except Exception as e:
@@ -276,6 +299,130 @@ def clean_job(job_id):
 
 
 # ============================================================
+# AÑADIR MÚSICA DE FONDO
+# ============================================================
+
+def add_background_music(
+    final_file,
+    job_dir
+):
+
+    if not MUSIC_FILE.exists():
+
+        raise RuntimeError(
+            "No se encontró la música de fondo: "
+            + str(MUSIC_FILE)
+        )
+
+    mixed_file = (
+        job_dir /
+        "final_mixed.mp4"
+    )
+
+    print(
+        "[MUSIC] Añadiendo música de fondo..."
+    )
+
+    print(
+        f"[MUSIC] Archivo: {MUSIC_FILE}"
+    )
+
+    print(
+        f"[MUSIC] Volumen: {MUSIC_VOLUME}"
+    )
+
+    command = [
+
+        "ffmpeg",
+
+        "-y",
+
+        "-threads",
+        "1",
+
+        # Vídeo ya renderizado
+        "-i",
+        str(final_file),
+
+        # Repetir música indefinidamente
+        "-stream_loop",
+        "-1",
+
+        "-i",
+        str(MUSIC_FILE),
+
+        # Bajar música y mezclarla con la voz
+        "-filter_complex",
+
+        (
+            f"[1:a]"
+            f"volume={MUSIC_VOLUME}"
+            f"[music];"
+            f"[0:a]"
+            f"[music]"
+            f"amix=inputs=2:"
+            f"duration=first:"
+            f"dropout_transition=2"
+            f"[a]"
+        ),
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "[a]",
+
+        "-c:v",
+        "copy",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "160k",
+
+        "-shortest",
+
+        "-movflags",
+        "+faststart",
+
+        str(mixed_file)
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+
+        raise RuntimeError(
+            "Error añadiendo música de fondo:\n"
+            + result.stderr[-5000:]
+        )
+
+    if not mixed_file.exists():
+
+        raise RuntimeError(
+            "FFmpeg no creó el vídeo con música."
+        )
+
+    final_file.unlink(
+        missing_ok=True
+    )
+
+    mixed_file.rename(
+        final_file
+    )
+
+    print(
+        "[MUSIC] Música añadida correctamente."
+    )
+
+
+# ============================================================
 # RENDER JOB
 # ============================================================
 
@@ -319,8 +466,10 @@ def run_job(
 
                 src = (
                     scene.get("video_url")
-                    or scene.get("src")
-                    or scene.get("video_src")
+                    or
+                    scene.get("src")
+                    or
+                    scene.get("video_src")
                 )
 
                 if not src:
@@ -331,7 +480,8 @@ def run_job(
 
                 audio_url = (
                     scene.get("audio_url")
-                    or scene.get("audio_src")
+                    or
+                    scene.get("audio_src")
                 )
 
                 duration = scene.get(
@@ -350,12 +500,11 @@ def run_job(
                     duration = 7
 
                 if duration < 1:
-
                     duration = 1
 
-                # =============================================
-                # DESCARGAR VIDEO
-                # =============================================
+                # =================================================
+                # VIDEO
+                # =================================================
 
                 video_input = (
                     job_dir /
@@ -367,9 +516,9 @@ def run_job(
                     video_input
                 )
 
-                # =============================================
-                # AUDIO
-                # =============================================
+                # =================================================
+                # AUDIO / VOZ
+                # =================================================
 
                 audio_input = None
 
@@ -385,18 +534,18 @@ def run_job(
                         audio_input
                     )
 
-                # =============================================
+                # =================================================
                 # SALIDA ESCENA
-                # =============================================
+                # =================================================
 
                 video_out = (
                     job_dir /
                     f"scene_{i}.mp4"
                 )
 
-                # =============================================
+                # =================================================
                 # FFMPEG CON AUDIO
-                # =============================================
+                # =================================================
 
                 if audio_input:
 
@@ -459,9 +608,9 @@ def run_job(
                         str(video_out)
                     ]
 
-                # =============================================
+                # =================================================
                 # FFMPEG SIN AUDIO
-                # =============================================
+                # =================================================
 
                 else:
 
@@ -514,20 +663,15 @@ def run_job(
                 )
 
                 result = subprocess.run(
-
                     command,
-
                     stdout=subprocess.DEVNULL,
-
                     stderr=subprocess.PIPE,
-
                     text=True
                 )
 
                 if result.returncode != 0:
 
                     raise RuntimeError(
-
                         f"Error renderizando escena {i + 1}:\n"
                         f"{result.stderr[-5000:]}"
                     )
@@ -547,8 +691,6 @@ def run_job(
                     video_out
                 )
 
-                # Liberar espacio
-
                 video_input.unlink(
                     missing_ok=True
                 )
@@ -560,7 +702,7 @@ def run_job(
                     )
 
             # =================================================
-            # CONCATENAR
+            # CONCATENAR ESCENAS
             # =================================================
 
             concat_file = (
@@ -618,20 +760,15 @@ def run_job(
             ]
 
             result = subprocess.run(
-
                 concat_command,
-
                 stdout=subprocess.DEVNULL,
-
                 stderr=subprocess.PIPE,
-
                 text=True
             )
 
             if result.returncode != 0:
 
                 raise RuntimeError(
-
                     "Error concatenando escenas:\n"
                     + result.stderr[-5000:]
                 )
@@ -641,6 +778,15 @@ def run_job(
                 raise RuntimeError(
                     "FFmpeg terminó pero no creó final.mp4"
                 )
+
+            # =================================================
+            # MÚSICA DE FONDO
+            # =================================================
+
+            add_background_music(
+                final_file,
+                job_dir
+            )
 
             # =================================================
             # COPIAR RESULTADO A VIDEO_DIR
@@ -727,8 +873,8 @@ def run_job(
                 missing_ok=True
             )
 
-            # Mantener VIDEO_DIR porque es
-            # el archivo que descargará n8n.
+            # VIDEO_DIR se conserva porque
+            # n8n descargará el MP4 desde ahí.
 
         except Exception as e:
 
@@ -771,11 +917,13 @@ def health():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=11,
+        version=12,
 
         video_upload=True,
 
-        whisper_model=WHISPER_MODEL_SIZE
+        whisper_model=WHISPER_MODEL_SIZE,
+
+        background_music=MUSIC_FILE.exists()
     )
 
 
@@ -798,11 +946,13 @@ def root():
 
         service="n8n-free-ffmpeg-renderer",
 
-        version=11,
+        version=12,
 
         video_upload=True,
 
-        whisper_model=WHISPER_MODEL_SIZE
+        whisper_model=WHISPER_MODEL_SIZE,
+
+        background_music=MUSIC_FILE.exists()
     )
 
 
@@ -884,8 +1034,11 @@ def tts():
     except Exception as e:
 
         return jsonify(
+
             ok=False,
+
             error=str(e)
+
         ), 500
 
 
@@ -899,38 +1052,52 @@ def upload_video():
     try:
 
         video = (
+
             request.files.get("file")
+
             or
+
             request.files.get("data")
+
             or
+
             request.files.get("video")
         )
 
         if not video:
 
             return jsonify(
+
                 ok=False,
-                error="No se recibió ningún vídeo."
+
+                error=(
+                    "No se recibió ningún vídeo."
+                )
+
             ), 400
 
         original_name = (
             video.filename
-            or "video.mp4"
+            or
+            "video.mp4"
         )
 
-        extension = (
-            Path(
-                original_name
-            ).suffix.lower()
-        )
+        extension = Path(
+            original_name
+        ).suffix.lower()
 
         allowed_extensions = {
 
             ".mp4",
+
             ".mov",
+
             ".mkv",
+
             ".webm",
+
             ".avi",
+
             ".m4v"
         }
 
@@ -989,8 +1156,11 @@ def upload_video():
     except Exception as e:
 
         return jsonify(
+
             ok=False,
+
             error=str(e)
+
         ), 500
 
 
@@ -1036,6 +1206,7 @@ def audio_file(filename):
 def transcribe():
 
     input_file = None
+    video_file = None
 
     try:
 
@@ -1044,8 +1215,11 @@ def transcribe():
         ) or {}
 
         video_url = (
+
             data.get("video_url")
+
             or
+
             data.get("url")
         )
 
@@ -1056,6 +1230,7 @@ def transcribe():
                 ok=False,
 
                 error="Falta video_url."
+
             ), 400
 
         video_url = normalize_url(
@@ -1180,16 +1355,17 @@ def transcribe():
         )
 
         output_segments = []
-
         output_words = []
-
         full_text = []
 
         for segment in segments:
 
             segment_text = (
+
                 segment.text
-                or ""
+                or
+                ""
+
             ).strip()
 
             if segment_text:
@@ -1205,8 +1381,11 @@ def transcribe():
                 for word in segment.words:
 
                     word_text = (
+
                         word.word
-                        or ""
+                        or
+                        ""
+
                     ).strip()
 
                     if not word_text:
@@ -1214,17 +1393,20 @@ def transcribe():
 
                     word_data = {
 
-                        "word": word_text,
+                        "word":
+                            word_text,
 
-                        "start": round(
-                            float(word.start),
-                            3
-                        ),
+                        "start":
+                            round(
+                                float(word.start),
+                                3
+                            ),
 
-                        "end": round(
-                            float(word.end),
-                            3
-                        )
+                        "end":
+                            round(
+                                float(word.end),
+                                3
+                            )
                     }
 
                     segment_words.append(
@@ -1237,25 +1419,31 @@ def transcribe():
 
             output_segments.append({
 
-                "start": round(
-                    float(segment.start),
-                    3
-                ),
+                "start":
+                    round(
+                        float(segment.start),
+                        3
+                    ),
 
-                "end": round(
-                    float(segment.end),
-                    3
-                ),
+                "end":
+                    round(
+                        float(segment.end),
+                        3
+                    ),
 
-                "text": segment_text,
+                "text":
+                    segment_text,
 
-                "words": segment_words
+                "words":
+                    segment_words
             })
 
         detected_language = (
+
             info.language
             if info
-            else "es"
+            else
+            "es"
         )
 
         language_probability = None
@@ -1265,9 +1453,11 @@ def transcribe():
             try:
 
                 language_probability = round(
+
                     float(
                         info.language_probability
                     ),
+
                     4
                 )
 
@@ -1281,7 +1471,8 @@ def transcribe():
 
         return jsonify({
 
-            "ok": True,
+            "ok":
+                True,
 
             "language":
                 detected_language,
@@ -1324,6 +1515,12 @@ def transcribe():
         if input_file:
 
             input_file.unlink(
+                missing_ok=True
+            )
+
+        if video_file:
+
+            video_file.unlink(
                 missing_ok=True
             )
 
@@ -1388,20 +1585,27 @@ def render():
                 continue
 
             src = (
+
                 scene.get("video_url")
+
                 or
+
                 scene.get("src")
+
                 or
+
                 scene.get("video_src")
             )
 
             if not src:
-
                 continue
 
             audio_url = (
+
                 scene.get("audio_url")
+
                 or
+
                 scene.get("audio_src")
             )
 
@@ -1542,6 +1746,7 @@ def request_entity_too_large(error):
 if __name__ == "__main__":
 
     port = int(
+
         os.environ.get(
             "PORT",
             10000
@@ -1549,6 +1754,8 @@ if __name__ == "__main__":
     )
 
     app.run(
+
         host="0.0.0.0",
+
         port=port
     )
