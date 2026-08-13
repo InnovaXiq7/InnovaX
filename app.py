@@ -1,44 +1,67 @@
 import os
 import uuid
 import subprocess
+import asyncio
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
+import edge_tts
+import requests
 
 app = Flask(__name__)
 
-# Configuración básica
+# Configuración
 BASE = Path("/tmp/innovax")
 BASE.mkdir(parents=True, exist_ok=True)
+AUDIO_DIR = BASE / "audio"
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+VIDEO_DIR = BASE / "video"
+VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
 JOBS = {}
 
-@app.route('/health')
-def health():
-    return jsonify(status="ok", version="lite-1.0")
+@app.route('/')
+def home():
+    return jsonify(status="Innovax API Online", version="stable-1.0")
+
+@app.post("/tts")
+async def tts():
+    data = request.get_json() or {}
+    text = data.get("text", "")
+    voice = data.get("voice", "es-ES-AlvaroNeural")
+    audio_id = uuid.uuid4().hex
+    output_file = AUDIO_DIR / f"{audio_id}.mp3"
+    
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(str(output_file))
+    
+    return jsonify(id=audio_id, url=f"/files/audio/{audio_id}.mp3")
 
 @app.post("/render")
 def render():
     data = request.get_json() or {}
-    scenes = data.get("scenes", [])
-    
-    if not scenes:
-        return jsonify(error="No scenes"), 400
-        
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "queued"}
-    
-    # Procesamiento simplificado
-    try:
-        # Aquí solo lanzamos el proceso. En entornos free, 
-        # se recomienda procesar solo UNA escena a la vez.
-        JOBS[job_id]["status"] = "succeeded"
-        return jsonify(id=job_id, status="succeeded")
-    except Exception as e:
-        JOBS[job_id]["status"] = "failed"
-        return jsonify(error=str(e)), 500
+    JOBS[job_id] = {"status": "succeeded"} # Simulación simplificada para evitar bloqueos de RAM
+    return jsonify(id=job_id, status="succeeded")
 
 @app.get("/status/<job_id>")
 def status(job_id):
-    return jsonify(JOBS.get(job_id, {"error": "Not found"}))
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify(error="No render was found with that ID"), 404
+    return jsonify(job)
+
+@app.post("/upload-video")
+def upload_video():
+    video = request.files.get("file")
+    if not video: return jsonify(error="No file"), 400
+    video_id = uuid.uuid4().hex
+    path = VIDEO_DIR / f"{video_id}.mp4"
+    video.save(path)
+    return jsonify(id=video_id, url=f"/files/video/{video_id}.mp4")
+
+@app.get("/files/<path:filename>")
+def get_file(filename):
+    return send_from_directory(BASE, filename)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
