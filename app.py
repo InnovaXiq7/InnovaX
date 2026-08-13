@@ -14,9 +14,13 @@ render_jobs = {}
 
 
 def download_file_stream(url, output_path):
-    """Descarga usando streams para no saturar la RAM."""
+    """Descarga usando streams y simula un navegador para evitar bloqueos de Cloudflare/Pixabay."""
     import requests
-    with requests.get(url, stream=True, timeout=60) as r:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*"
+    }
+    with requests.get(url, headers=headers, stream=True, timeout=30) as r:
         r.raise_for_status()
         with open(output_path, 'wb') as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
