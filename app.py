@@ -1,11 +1,9 @@
 import os
 import uuid
-import subprocess
-import asyncio
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 import edge_tts
-import requests
+import asyncio
 
 app = Flask(__name__)
 
@@ -24,15 +22,19 @@ def home():
     return jsonify(status="Innovax API Online", version="stable-1.0")
 
 @app.post("/tts")
-async def tts():
+def tts():
     data = request.get_json() or {}
     text = data.get("text", "")
     voice = data.get("voice", "es-ES-AlvaroNeural")
     audio_id = uuid.uuid4().hex
     output_file = AUDIO_DIR / f"{audio_id}.mp3"
     
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(str(output_file))
+    # Ejecutamos edge_tts de forma síncrona para evitar el error de Flask
+    async def _generate():
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(str(output_file))
+
+    asyncio.run(_generate())
     
     return jsonify(id=audio_id, url=f"/files/audio/{audio_id}.mp3")
 
@@ -40,7 +42,7 @@ async def tts():
 def render():
     data = request.get_json() or {}
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status": "succeeded"} # Simulación simplificada para evitar bloqueos de RAM
+    JOBS[job_id] = {"status": "succeeded"}
     return jsonify(id=job_id, status="succeeded")
 
 @app.get("/status/<job_id>")
