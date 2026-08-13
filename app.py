@@ -1,29 +1,21 @@
 import os
 import uuid
-import json
 import shutil
 import subprocess
 import threading
 import asyncio
-import urllib.request
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
+import requests
 import edge_tts
 from faster_whisper import WhisperModel
 
 
-# ============================================================
-# APP
-# ============================================================
-
 app = Flask(__name__)
 
-app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
-
-
 # ============================================================
-# DIRECTORIOS
+# CONFIGURACIÓN
 # ============================================================
 
 BASE = Path("/tmp/innovax")
@@ -35,195 +27,30 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_DIR = BASE / "video"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
-JOBS_DIR = BASE / "jobs"
-JOBS_DIR.mkdir(parents=True, exist_ok=True)
+JOBS = {}
 
+RENDER_LOCK = threading.Lock()
+WHISPER_LOCK = threading.Lock()
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
-PORT = int(os.environ.get("PORT", "10000"))
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL",
-    ""
+    "https://innovax.onrender.com"
 ).rstrip("/")
+
+
+# ============================================================
+# WHISPER
+# ============================================================
 
 WHISPER_MODEL_SIZE = os.environ.get(
     "WHISPER_MODEL",
     "tiny"
 )
 
-
-# ============================================================
-# LOCKS
-# ============================================================
-
-RENDER_LOCK = threading.Lock()
-WHISPER_LOCK = threading.Lock()
-
 WHISPER_MODEL = None
 
-
-# ============================================================
-# URL PÚBLICA
-# ============================================================
-
-def get_public_base_url():
-
-    if PUBLIC_BASE_URL:
-        return PUBLIC_BASE_URL
-
-    hostname = os.environ.get(
-        "RENDER_EXTERNAL_HOSTNAME"
-    )
-
-    if hostname:
-        return f"https://{hostname}"
-
-    return request.host_url.rstrip("/")
-
-
-def public_url(path):
-
-    base = get_public_base_url()
-
-    if not path.startswith("/"):
-        path = "/" + path
-
-    return base + path
-
-
-# ============================================================
-# JOBS
-# ============================================================
-
-def job_file(job_id):
-
-    return JOBS_DIR / f"{job_id}.json"
-
-
-def save_job(job):
-
-    path = job_file(job["id"])
-
-    with open(path, "w", encoding="utf-8") as f:
-
-        json.dump(
-            job,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-
-def load_job(job_id):
-
-    path = job_file(job_id)
-
-    if not path.exists():
-        return None
-
-    try:
-
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# FFMPEG
-# ============================================================
-
-def run_ffmpeg(command):
-
-    print()
-    print("[FFMPEG] Ejecutando:")
-    print(" ".join(str(x) for x in command))
-    print()
-
-    result = subprocess.run(
-
-        command,
-
-        stdout=subprocess.DEVNULL,
-
-        stderr=subprocess.PIPE,
-
-        text=True
-
-    )
-
-    if result.returncode != 0:
-
-        print("[FFMPEG ERROR]")
-        print(result.stderr)
-
-        raise RuntimeError(
-            result.stderr[-6000:]
-        )
-
-    return result
-
-
-# ============================================================
-# DESCARGAR ARCHIVO HTTP
-# ============================================================
-
-def download_file(url, destination):
-
-    print()
-    print("[DOWNLOAD]")
-    print(url)
-    print()
-
-    request_obj = urllib.request.Request(
-
-        url,
-
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        }
-
-    )
-
-    try:
-
-        with urllib.request.urlopen(
-            request_obj,
-            timeout=120
-        ) as response:
-
-            with open(
-                destination,
-                "wb"
-            ) as output:
-
-                while True:
-
-                    chunk = response.read(
-                        1024 * 1024
-                    )
-
-                    if not chunk:
-                        break
-
-                    output.write(chunk)
-
-    except Exception as e:
-
-        raise RuntimeError(
-            f"No se pudo descargar el archivo desde URL: {e}"
-        )
-
-
-# ============================================================
-# WHISPER
-# ============================================================
 
 def get_whisper_model():
 
@@ -241,17 +68,11 @@ def get_whisper_model():
                 )
 
                 WHISPER_MODEL = WhisperModel(
-
                     WHISPER_MODEL_SIZE,
-
                     device="cpu",
-
                     compute_type="int8",
-
                     cpu_threads=2,
-
                     num_workers=1
-
                 )
 
                 print(
@@ -262,7 +83,146 @@ def get_whisper_model():
 
 
 # ============================================================
-# TTS
+# URL PÚBLICA
+# ============================================================
+
+def public_url(path):
+
+    if not path:
+        return None
+
+    path = str(path).strip()
+
+    # Quitar = accidental
+    if path.startswith("="):
+        path = path[1:].strip()
+
+    # Ya es URL completa
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+
+    # URL relativa
+    if not path.startswith("/"):
+        path = "/" + path
+
+    return f"{PUBLIC_BASE_URL}{path}"
+
+
+# ============================================================
+# NORMALIZAR URL
+# ============================================================
+
+def normalize_url(value):
+
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    # Quitar =
+    if value.startswith("="):
+        value = value[1:].strip()
+
+    # Quitar comillas
+    if len(value) >= 2:
+
+        if (
+            (value.startswith('"') and value.endswith('"'))
+            or
+            (value.startswith("'") and value.endswith("'"))
+        ):
+
+            value = value[1:-1].strip()
+
+    return public_url(value)
+
+
+# ============================================================
+# DESCARGAR ARCHIVO
+# ============================================================
+
+def download_file(url, output_file):
+
+    url = normalize_url(url)
+
+    if not url:
+        raise ValueError(
+            "URL vacía."
+        )
+
+    print(
+        "[DOWNLOAD] Descargando:"
+    )
+
+    print(url)
+
+    print(
+        "[DOWNLOAD] Destino:"
+    )
+
+    print(output_file)
+
+    try:
+
+        response = requests.get(
+            url,
+            stream=True,
+            timeout=(30, 300),
+            headers={
+                "User-Agent": "Innovax/1.0"
+            }
+        )
+
+        response.raise_for_status()
+
+        output_file.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        with open(
+            output_file,
+            "wb"
+        ) as f:
+
+            for chunk in response.iter_content(
+                chunk_size=1024 * 1024
+            ):
+
+                if chunk:
+
+                    f.write(chunk)
+
+    except Exception as e:
+
+        raise RuntimeError(
+            "No se pudo descargar el archivo desde la URL: "
+            + url
+            + "\n"
+            + str(e)
+        )
+
+    if not output_file.exists():
+
+        raise RuntimeError(
+            "La descarga terminó pero el archivo no existe."
+        )
+
+    size = output_file.stat().st_size
+
+    if size <= 0:
+
+        raise RuntimeError(
+            "La descarga creó un archivo vacío."
+        )
+
+    print(
+        f"[DOWNLOAD] OK - {size} bytes"
+    )
+
+
+# ============================================================
+# EDGE TTS
 # ============================================================
 
 async def generate_tts_async(
@@ -272,17 +232,11 @@ async def generate_tts_async(
 ):
 
     communicate = edge_tts.Communicate(
-
         text=text,
-
         voice=voice,
-
         rate="+0%",
-
         volume="+0%",
-
         pitch="+0Hz"
-
     )
 
     await communicate.save(
@@ -297,520 +251,487 @@ def generate_tts(
 ):
 
     asyncio.run(
-
         generate_tts_async(
-
             text,
-
             voice,
-
             output_file
-
         )
-
     )
 
 
 # ============================================================
-# RENDER DE UNA ESCENA
+# LIMPIAR JOB
 # ============================================================
 
-def render_scene(
-    scene,
-    index,
-    job_dir
-):
+def clean_job(job_id):
 
-    video_url = (
-        scene.get("video_url")
-        or scene.get("src")
-        or scene.get("video_src")
-    )
+    job_dir = BASE / job_id
 
-    audio_url = (
-        scene.get("audio_url")
-        or scene.get("audio_src")
-    )
+    if job_dir.exists():
 
-    if not video_url:
-
-        raise ValueError(
-            f"La escena {index + 1} no tiene video_url."
+        shutil.rmtree(
+            job_dir,
+            ignore_errors=True
         )
-
-    duration = scene.get(
-        "duration",
-        7
-    )
-
-    try:
-
-        duration = float(duration)
-
-    except Exception:
-
-        duration = 7
-
-    if duration < 1:
-        duration = 1
-
-    if duration > 60:
-        duration = 60
-
-
-    # --------------------------------------------------------
-    # ARCHIVO LOCAL DEL VÍDEO
-    # --------------------------------------------------------
-
-    video_input = (
-        job_dir /
-        f"input_video_{index}.mp4"
-    )
-
-    print()
-    print(
-        f"[SCENE {index + 1}] "
-        f"Descargando vídeo..."
-    )
-
-    download_file(
-        video_url,
-        video_input
-    )
-
-
-    # --------------------------------------------------------
-    # ARCHIVO LOCAL DEL AUDIO
-    # --------------------------------------------------------
-
-    audio_input = None
-
-    if audio_url:
-
-        audio_input = (
-            job_dir /
-            f"input_audio_{index}.mp3"
-        )
-
-        print(
-            f"[SCENE {index + 1}] "
-            f"Descargando audio..."
-        )
-
-        download_file(
-            audio_url,
-            audio_input
-        )
-
-
-    # --------------------------------------------------------
-    # SALIDA
-    # --------------------------------------------------------
-
-    output_file = (
-        job_dir /
-        f"scene_{index}.mp4"
-    )
-
-
-    # --------------------------------------------------------
-    # CON AUDIO
-    # --------------------------------------------------------
-
-    if audio_input:
-
-        command = [
-
-            "ffmpeg",
-
-            "-y",
-
-            "-threads",
-            "1",
-
-            "-i",
-            str(video_input),
-
-            "-i",
-            str(audio_input),
-
-            "-t",
-            str(duration),
-
-            "-vf",
-
-            (
-                "scale=720:1280:"
-                "force_original_aspect_ratio=increase,"
-                "crop=720:1280,"
-                "fps=24"
-            ),
-
-            "-map",
-            "0:v:0",
-
-            "-map",
-            "1:a:0",
-
-            "-c:v",
-            "libx264",
-
-            "-preset",
-            "ultrafast",
-
-            "-crf",
-            "28",
-
-            "-c:a",
-            "aac",
-
-            "-b:a",
-            "128k",
-
-            "-shortest",
-
-            "-pix_fmt",
-            "yuv420p",
-
-            str(output_file)
-
-        ]
-
-
-    # --------------------------------------------------------
-    # SIN AUDIO
-    # --------------------------------------------------------
-
-    else:
-
-        command = [
-
-            "ffmpeg",
-
-            "-y",
-
-            "-threads",
-            "1",
-
-            "-i",
-            str(video_input),
-
-            "-t",
-            str(duration),
-
-            "-vf",
-
-            (
-                "scale=720:1280:"
-                "force_original_aspect_ratio=increase,"
-                "crop=720:1280,"
-                "fps=24"
-            ),
-
-            "-c:v",
-            "libx264",
-
-            "-preset",
-            "ultrafast",
-
-            "-crf",
-            "28",
-
-            "-pix_fmt",
-            "yuv420p",
-
-            "-an",
-
-            str(output_file)
-
-        ]
-
-
-    run_ffmpeg(command)
-
-
-    if not output_file.exists():
-
-        raise RuntimeError(
-            f"No se creó la escena {index + 1}"
-        )
-
-
-    if output_file.stat().st_size < 1000:
-
-        raise RuntimeError(
-            f"La escena {index + 1} "
-            f"se creó pero está vacía."
-        )
-
-
-    print(
-        f"[SCENE {index + 1}] OK"
-    )
-
-    return output_file
 
 
 # ============================================================
-# CONCATENAR ESCENAS
+# RENDER JOB
 # ============================================================
 
-def concat_scenes(
-    scene_files,
-    output_file
-):
-
-    concat_file = (
-        output_file.parent /
-        "concat.txt"
-    )
-
-    lines = []
-
-    for file in scene_files:
-
-        escaped = (
-            str(file)
-            .replace("'", "'\\''")
-        )
-
-        lines.append(
-            f"file '{escaped}'\n"
-        )
-
-    concat_file.write_text(
-        "".join(lines),
-        encoding="utf-8"
-    )
-
-
-    command = [
-
-        "ffmpeg",
-
-        "-y",
-
-        "-threads",
-        "1",
-
-        "-f",
-        "concat",
-
-        "-safe",
-        "0",
-
-        "-i",
-        str(concat_file),
-
-        "-c",
-        "copy",
-
-        "-movflags",
-        "+faststart",
-
-        str(output_file)
-
-    ]
-
-
-    run_ffmpeg(command)
-
-
-    if not output_file.exists():
-
-        raise RuntimeError(
-            "No se creó el vídeo final."
-        )
-
-
-    if output_file.stat().st_size < 1000:
-
-        raise RuntimeError(
-            "El vídeo final está vacío."
-        )
-
-
-    concat_file.unlink(
-        missing_ok=True
-    )
-
-
-# ============================================================
-# TRABAJO DE RENDER
-# ============================================================
-
-def run_render_job(
+def run_job(
     job_id,
     scenes
 ):
 
     with RENDER_LOCK:
 
-        job = load_job(job_id)
-
-        if not job:
-            return
-
-        job["status"] = "rendering"
-
-        save_job(job)
-
-
-        job_dir = (
-            BASE /
-            "renders" /
-            job_id
-        )
+        job_dir = BASE / job_id
 
         job_dir.mkdir(
             parents=True,
             exist_ok=True
         )
 
+        JOBS[job_id]["status"] = "rendering"
 
         try:
 
-            print()
+            inputs = []
+
             print(
-                "======================================"
-            )
-            print(
-                f"[RENDER] INICIO {job_id}"
-            )
-            print(
-                "======================================"
+                f"[RENDER] Job: {job_id}"
             )
 
+            print(
+                f"[RENDER] Escenas: {len(scenes)}"
+            )
 
-            scene_files = []
+            # =================================================
+            # PROCESAR ESCENAS
+            # =================================================
 
+            for i, scene in enumerate(scenes):
 
-            # ------------------------------------------------
-            # ESCENAS
-            # ------------------------------------------------
-
-            for index, scene in enumerate(
-                scenes
-            ):
-
-                scene_file = render_scene(
-
-                    scene,
-
-                    index,
-
-                    job_dir
-
+                print(
+                    f"[RENDER] Procesando escena {i + 1}"
                 )
 
-                scene_files.append(
-                    scene_file
+                src = (
+                    scene.get("video_url")
+                    or scene.get("src")
+                    or scene.get("video_src")
                 )
 
+                if not src:
 
-            # ------------------------------------------------
-            # FINAL
-            # ------------------------------------------------
+                    raise ValueError(
+                        f"Scene {i + 1} no tiene video_url."
+                    )
+
+                audio_url = (
+                    scene.get("audio_url")
+                    or scene.get("audio_src")
+                )
+
+                duration = scene.get(
+                    "duration",
+                    7
+                )
+
+                try:
+
+                    duration = float(
+                        duration
+                    )
+
+                except Exception:
+
+                    duration = 7
+
+                if duration < 1:
+
+                    duration = 1
+
+                # =============================================
+                # DESCARGAR VIDEO
+                # =============================================
+
+                video_input = (
+                    job_dir /
+                    f"input_video_{i}.mp4"
+                )
+
+                download_file(
+                    src,
+                    video_input
+                )
+
+                # =============================================
+                # AUDIO
+                # =============================================
+
+                audio_input = None
+
+                if audio_url:
+
+                    audio_input = (
+                        job_dir /
+                        f"input_audio_{i}.mp3"
+                    )
+
+                    download_file(
+                        audio_url,
+                        audio_input
+                    )
+
+                # =============================================
+                # SALIDA ESCENA
+                # =============================================
+
+                video_out = (
+                    job_dir /
+                    f"scene_{i}.mp4"
+                )
+
+                # =============================================
+                # FFMPEG CON AUDIO
+                # =============================================
+
+                if audio_input:
+
+                    command = [
+
+                        "ffmpeg",
+
+                        "-y",
+
+                        "-threads",
+                        "1",
+
+                        "-i",
+                        str(video_input),
+
+                        "-i",
+                        str(audio_input),
+
+                        "-t",
+                        str(duration),
+
+                        "-vf",
+
+                        (
+                            "scale=720:1280:"
+                            "force_original_aspect_ratio=increase,"
+                            "crop=720:1280,"
+                            "fps=24"
+                        ),
+
+                        "-map",
+                        "0:v:0",
+
+                        "-map",
+                        "1:a:0",
+
+                        "-c:v",
+                        "libx264",
+
+                        "-preset",
+                        "ultrafast",
+
+                        "-crf",
+                        "28",
+
+                        "-c:a",
+                        "aac",
+
+                        "-b:a",
+                        "128k",
+
+                        "-shortest",
+
+                        "-pix_fmt",
+                        "yuv420p",
+
+                        "-movflags",
+                        "+faststart",
+
+                        str(video_out)
+                    ]
+
+                # =============================================
+                # FFMPEG SIN AUDIO
+                # =============================================
+
+                else:
+
+                    command = [
+
+                        "ffmpeg",
+
+                        "-y",
+
+                        "-threads",
+                        "1",
+
+                        "-i",
+                        str(video_input),
+
+                        "-t",
+                        str(duration),
+
+                        "-vf",
+
+                        (
+                            "scale=720:1280:"
+                            "force_original_aspect_ratio=increase,"
+                            "crop=720:1280,"
+                            "fps=24"
+                        ),
+
+                        "-c:v",
+                        "libx264",
+
+                        "-preset",
+                        "ultrafast",
+
+                        "-crf",
+                        "28",
+
+                        "-pix_fmt",
+                        "yuv420p",
+
+                        "-an",
+
+                        "-movflags",
+                        "+faststart",
+
+                        str(video_out)
+                    ]
+
+                print(
+                    "[FFMPEG] Renderizando escena..."
+                )
+
+                result = subprocess.run(
+
+                    command,
+
+                    stdout=subprocess.DEVNULL,
+
+                    stderr=subprocess.PIPE,
+
+                    text=True
+                )
+
+                if result.returncode != 0:
+
+                    raise RuntimeError(
+
+                        f"Error renderizando escena {i + 1}:\n"
+                        f"{result.stderr[-5000:]}"
+                    )
+
+                if not video_out.exists():
+
+                    raise RuntimeError(
+                        f"FFmpeg terminó pero no creó "
+                        f"scene_{i}.mp4"
+                    )
+
+                print(
+                    f"[RENDER] Escena {i + 1} OK"
+                )
+
+                inputs.append(
+                    video_out
+                )
+
+                # Liberar espacio
+
+                video_input.unlink(
+                    missing_ok=True
+                )
+
+                if audio_input:
+
+                    audio_input.unlink(
+                        missing_ok=True
+                    )
+
+            # =================================================
+            # CONCATENAR
+            # =================================================
+
+            concat_file = (
+                job_dir /
+                "concat.txt"
+            )
+
+            concat_lines = []
+
+            for video_file in inputs:
+
+                concat_lines.append(
+                    f"file '{video_file.as_posix()}'\n"
+                )
+
+            concat_file.write_text(
+                "".join(concat_lines),
+                encoding="utf-8"
+            )
 
             final_file = (
                 job_dir /
                 "final.mp4"
             )
 
-
-            concat_scenes(
-
-                scene_files,
-
-                final_file
-
+            print(
+                "[RENDER] Concatenando escenas..."
             )
 
+            concat_command = [
 
-            # ------------------------------------------------
-            # COMPROBAR FINAL
-            # ------------------------------------------------
+                "ffmpeg",
+
+                "-y",
+
+                "-threads",
+                "1",
+
+                "-f",
+                "concat",
+
+                "-safe",
+                "0",
+
+                "-i",
+                str(concat_file),
+
+                "-c",
+                "copy",
+
+                "-movflags",
+                "+faststart",
+
+                str(final_file)
+            ]
+
+            result = subprocess.run(
+
+                concat_command,
+
+                stdout=subprocess.DEVNULL,
+
+                stderr=subprocess.PIPE,
+
+                text=True
+            )
+
+            if result.returncode != 0:
+
+                raise RuntimeError(
+
+                    "Error concatenando escenas:\n"
+                    + result.stderr[-5000:]
+                )
 
             if not final_file.exists():
 
                 raise RuntimeError(
-                    "FFmpeg terminó pero "
-                    "final.mp4 no existe."
+                    "FFmpeg terminó pero no creó final.mp4"
                 )
 
+            # =================================================
+            # COPIAR RESULTADO A VIDEO_DIR
+            # =================================================
 
-            size = final_file.stat().st_size
+            public_filename = (
+                f"{job_id}.mp4"
+            )
 
+            public_file = (
+                VIDEO_DIR /
+                public_filename
+            )
 
-            if size < 1000:
+            shutil.copy2(
+                final_file,
+                public_file
+            )
+
+            if not public_file.exists():
 
                 raise RuntimeError(
-                    "final.mp4 está vacío."
+                    "No se pudo crear el archivo público."
                 )
 
-
-            final_path = (
-                f"/files/render/"
-                f"{job_id}/final.mp4"
+            public_path = (
+                f"/files/video/{public_filename}"
             )
 
-
-            final_public_url = public_url(
-                final_path
+            final_url = public_url(
+                public_path
             )
 
+            file_size = (
+                public_file.stat().st_size
+            )
 
-            # ------------------------------------------------
+            print(
+                "[RENDER] FINALIZADO"
+            )
+
+            print(
+                final_url
+            )
+
+            print(
+                f"[RENDER] Tamaño: {file_size} bytes"
+            )
+
+            # =================================================
             # ÉXITO
-            # ------------------------------------------------
+            # =================================================
 
-            job = load_job(job_id) or {
-                "id": job_id
-            }
+            JOBS[job_id].update(
 
+                status="succeeded",
 
-            job.update({
+                url=final_url,
 
-                "status":
-                    "succeeded",
+                public_url=final_url,
 
-                "url":
-                    final_public_url,
+                filename=public_filename,
 
-                "public_url":
-                    final_public_url,
+                size=file_size,
 
-                "filename":
-                    "final.mp4",
-
-                "size":
-                    size,
-
-                "scene_count":
-                    len(scene_files)
-
-            })
-
-
-            save_job(job)
-
-
-            print()
-            print(
-                "[RENDER] COMPLETADO"
+                scene_count=len(scenes)
             )
 
-            print(
-                f"[RENDER] URL: "
-                f"{final_public_url}"
+            # =================================================
+            # LIMPIAR TEMPORALES
+            # =================================================
+
+            for video_file in inputs:
+
+                video_file.unlink(
+                    missing_ok=True
+                )
+
+            concat_file.unlink(
+                missing_ok=True
             )
 
-            print()
+            final_file.unlink(
+                missing_ok=True
+            )
 
+            # Mantener VIDEO_DIR porque es
+            # el archivo que descargará n8n.
 
         except Exception as e:
 
-            print()
             print(
                 "[RENDER ERROR]"
             )
@@ -819,32 +740,16 @@ def run_render_job(
                 str(e)
             )
 
-            print()
+            JOBS[job_id].update(
 
+                status="failed",
 
-            job = load_job(job_id) or {
-                "id": job_id
-            }
+                error=str(e)
+            )
 
-
-            job.update({
-
-                "status":
-                    "failed",
-
-                "error":
-                    str(e),
-
-                "url":
-                    None,
-
-                "public_url":
-                    None
-
-            })
-
-
-            save_job(job)
+            clean_job(
+                job_id
+            )
 
 
 # ============================================================
@@ -854,33 +759,24 @@ def run_render_job(
 @app.get("/health")
 def health():
 
-    return jsonify({
+    return jsonify(
 
-        "ok":
-            True,
+        ok=True,
 
-        "service":
-            "n8n-free-ffmpeg-renderer",
+        render=True,
 
-        "version":
-            10,
+        transcription=True,
 
-        "tts":
-            "edge-tts",
+        tts="edge-tts",
 
-        "transcription":
-            True,
+        service="n8n-free-ffmpeg-renderer",
 
-        "video_upload":
-            True,
+        version=11,
 
-        "render":
-            True,
+        video_upload=True,
 
-        "whisper_model":
-            WHISPER_MODEL_SIZE
-
-    })
+        whisper_model=WHISPER_MODEL_SIZE
+    )
 
 
 # ============================================================
@@ -890,18 +786,24 @@ def health():
 @app.get("/")
 def root():
 
-    return jsonify({
+    return jsonify(
 
-        "ok":
-            True,
+        ok=True,
 
-        "service":
-            "n8n-free-ffmpeg-renderer",
+        render=True,
 
-        "version":
-            10
+        transcription=True,
 
-    })
+        tts="edge-tts",
+
+        service="n8n-free-ffmpeg-renderer",
+
+        version=11,
+
+        video_upload=True,
+
+        whisper_model=WHISPER_MODEL_SIZE
+    )
 
 
 # ============================================================
@@ -913,13 +815,9 @@ def tts():
 
     try:
 
-        data = (
-            request.get_json(
-                silent=True
-            )
-            or {}
-        )
-
+        data = request.get_json(
+            silent=True
+        ) or {}
 
         text = str(
             data.get(
@@ -928,7 +826,6 @@ def tts():
             )
         ).strip()
 
-
         voice = str(
             data.get(
                 "voice",
@@ -936,19 +833,11 @@ def tts():
             )
         ).strip()
 
-
         if not text:
 
-            return jsonify({
-
-                "ok":
-                    False,
-
-                "error":
-                    "No text supplied."
-
-            }), 400
-
+            return jsonify(
+                error="No text supplied."
+            ), 400
 
         audio_id = uuid.uuid4().hex
 
@@ -961,17 +850,11 @@ def tts():
             filename
         )
 
-
         generate_tts(
-
             text,
-
             voice,
-
             output_file
-
         )
-
 
         if not output_file.exists():
 
@@ -979,47 +862,31 @@ def tts():
                 "TTS no creó el archivo."
             )
 
-
         path = (
-            f"/files/audio/"
-            f"{filename}"
+            f"/files/audio/{filename}"
         )
 
+        return jsonify(
 
-        return jsonify({
+            ok=True,
 
-            "ok":
-                True,
+            id=audio_id,
 
-            "id":
-                audio_id,
+            voice=voice,
 
-            "voice":
-                voice,
+            url=path,
 
-            "filename":
-                filename,
-
-            "url":
-                path,
-
-            "public_url":
-                public_url(path)
-
-        })
-
+            public_url=public_url(
+                path
+            )
+        )
 
     except Exception as e:
 
-        return jsonify({
-
-            "ok":
-                False,
-
-            "error":
-                str(e)
-
-        }), 500
+        return jsonify(
+            ok=False,
+            error=str(e)
+        ), 500
 
 
 # ============================================================
@@ -1032,39 +899,24 @@ def upload_video():
     try:
 
         video = (
-
             request.files.get("file")
-
             or
-
             request.files.get("data")
-
             or
-
             request.files.get("video")
-
         )
-
 
         if not video:
 
-            return jsonify({
-
-                "ok":
-                    False,
-
-                "error":
-                    "No file supplied."
-
-            }), 400
-
+            return jsonify(
+                ok=False,
+                error="No se recibió ningún vídeo."
+            ), 400
 
         original_name = (
             video.filename
-            or
-            "video.mp4"
+            or "video.mp4"
         )
-
 
         extension = (
             Path(
@@ -1072,8 +924,7 @@ def upload_video():
             ).suffix.lower()
         )
 
-
-        allowed = {
+        allowed_extensions = {
 
             ".mp4",
             ".mov",
@@ -1081,34 +932,26 @@ def upload_video():
             ".webm",
             ".avi",
             ".m4v"
-
         }
 
-
-        if extension not in allowed:
+        if extension not in allowed_extensions:
 
             extension = ".mp4"
 
-
         video_id = uuid.uuid4().hex
 
-
         filename = (
-            f"{video_id}"
-            f"{extension}"
+            f"{video_id}{extension}"
         )
-
 
         output_file = (
             VIDEO_DIR /
             filename
         )
 
-
         video.save(
             output_file
         )
-
 
         if not output_file.exists():
 
@@ -1116,64 +959,46 @@ def upload_video():
                 "El vídeo no se pudo guardar."
             )
 
-
-        size = (
+        file_size = (
             output_file.stat().st_size
         )
 
-
         path = (
-            f"/files/video/"
-            f"{filename}"
+            f"/files/video/{filename}"
         )
 
+        return jsonify(
 
-        return jsonify({
+            ok=True,
 
-            "ok":
-                True,
+            id=video_id,
 
-            "id":
-                video_id,
+            filename=filename,
 
-            "filename":
-                filename,
+            original_filename=original_name,
 
-            "original_filename":
-                original_name,
+            size=file_size,
 
-            "size":
-                size,
+            url=path,
 
-            "url":
-                path,
-
-            "public_url":
-                public_url(path)
-
-        })
-
+            public_url=public_url(
+                path
+            )
+        )
 
     except Exception as e:
 
-        return jsonify({
-
-            "ok":
-                False,
-
-            "error":
-                str(e)
-
-        }), 500
+        return jsonify(
+            ok=False,
+            error=str(e)
+        ), 500
 
 
 # ============================================================
-# SERVIR VIDEOS SUBIDOS
+# SERVIR VIDEOS
 # ============================================================
 
-@app.get(
-    "/files/video/<filename>"
-)
+@app.get("/files/video/<filename>")
 def video_file(filename):
 
     return send_from_directory(
@@ -1183,7 +1008,6 @@ def video_file(filename):
         filename,
 
         as_attachment=False
-
     )
 
 
@@ -1191,9 +1015,7 @@ def video_file(filename):
 # SERVIR AUDIO
 # ============================================================
 
-@app.get(
-    "/files/audio/<filename>"
-)
+@app.get("/files/audio/<filename>")
 def audio_file(filename):
 
     return send_from_directory(
@@ -1203,219 +1025,148 @@ def audio_file(filename):
         filename,
 
         as_attachment=False
-
     )
 
 
 # ============================================================
-# TRANSCRIBE
+# TRANSCRIBIR
 # ============================================================
 
 @app.post("/transcribe")
 def transcribe():
 
-    temp_video = None
-    temp_audio = None
+    input_file = None
 
     try:
 
-        data = (
-            request.get_json(
-                silent=True
-            )
-            or {}
-        )
-
+        data = request.get_json(
+            silent=True
+        ) or {}
 
         video_url = (
-
-            data.get(
-                "video_url"
-            )
-
+            data.get("video_url")
             or
-
-            data.get(
-                "url"
-            )
-
+            data.get("url")
         )
-
-
-        if video_url:
-
-            video_url = str(
-                video_url
-            ).strip()
-
 
         if not video_url:
 
-            return jsonify({
+            return jsonify(
 
-                "ok":
-                    False,
+                ok=False,
 
-                "error":
-                    "Falta video_url."
+                error="Falta video_url."
+            ), 400
 
-            }), 400
+        video_url = normalize_url(
+            video_url
+        )
 
+        print(
+            "[WHISPER] Descargando vídeo desde URL:"
+        )
 
-        if video_url.startswith("="):
-
-            video_url = (
-                video_url[1:]
-                .strip()
-            )
-
-
-        if (
-
-            video_url.startswith('"')
-            and
-            video_url.endswith('"')
-
-        ):
-
-            video_url = video_url[1:-1]
-
-
-        if (
-
-            video_url.startswith("'")
-            and
-            video_url.endswith("'")
-
-        ):
-
-            video_url = video_url[1:-1]
-
-
-        if not (
-
-            video_url.startswith(
-                "http://"
-            )
-
-            or
-
-            video_url.startswith(
-                "https://"
-            )
-
-        ):
-
-            raise ValueError(
-
-                "video_url no es una URL "
-                "HTTP/HTTPS válida."
-
-            )
-
+        print(video_url)
 
         temp_id = uuid.uuid4().hex
 
-
-        temp_video = (
+        video_file = (
             BASE /
             f"transcribe_{temp_id}.mp4"
         )
 
-
-        temp_audio = (
+        input_file = (
             BASE /
             f"transcribe_{temp_id}.wav"
         )
 
-
-        print()
-        print(
-            "[WHISPER] "
-            "Descargando vídeo:"
-        )
-
-        print(
-            video_url
-        )
-
-
-        # ----------------------------------------------------
-        # DESCARGAR
-        # ----------------------------------------------------
+        # ====================================================
+        # DESCARGAR VIDEO
+        # ====================================================
 
         download_file(
-
             video_url,
-
-            temp_video
-
+            video_file
         )
 
-
-        # ----------------------------------------------------
+        # ====================================================
         # EXTRAER AUDIO
-        # ----------------------------------------------------
+        # ====================================================
 
         print(
-            "[WHISPER] "
-            "Extrayendo audio..."
+            "[WHISPER] Extrayendo audio..."
         )
 
+        result = subprocess.run(
 
-        run_ffmpeg([
+            [
 
-            "ffmpeg",
+                "ffmpeg",
 
-            "-y",
+                "-y",
 
-            "-threads",
-            "1",
+                "-threads",
+                "1",
 
-            "-i",
-            str(temp_video),
+                "-i",
+                str(video_file),
 
-            "-map",
-            "0:a:0?",
+                "-map",
+                "0:a:0?",
 
-            "-vn",
+                "-vn",
 
-            "-ac",
-            "1",
+                "-ac",
+                "1",
 
-            "-ar",
-            "16000",
+                "-ar",
+                "16000",
 
-            "-c:a",
-            "pcm_s16le",
+                "-c:a",
+                "pcm_s16le",
 
-            str(temp_audio)
+                str(input_file)
+            ],
 
-        ])
+            stdout=subprocess.DEVNULL,
 
+            stderr=subprocess.PIPE,
 
-        if not temp_audio.exists():
+            text=True
+        )
+
+        if result.returncode != 0:
 
             raise RuntimeError(
-                "No se pudo crear el audio."
+
+                "No se pudo extraer el audio "
+                "del vídeo:\n"
+                + result.stderr[-4000:]
             )
 
+        if not input_file.exists():
 
-        # ----------------------------------------------------
+            raise RuntimeError(
+                "No se creó el archivo de audio."
+            )
+
+        # ====================================================
         # WHISPER
-        # ----------------------------------------------------
+        # ====================================================
+
+        print(
+            "[WHISPER] Cargando modelo..."
+        )
 
         model = get_whisper_model()
-
 
         print(
             "[WHISPER] Transcribiendo..."
         )
 
-
         segments, info = model.transcribe(
 
-            str(temp_audio),
+            str(input_file),
 
             language="es",
 
@@ -1426,16 +1177,13 @@ def transcribe():
             vad_filter=True,
 
             condition_on_previous_text=False
-
         )
-
 
         output_segments = []
 
         output_words = []
 
         full_text = []
-
 
         for segment in segments:
 
@@ -1444,16 +1192,13 @@ def transcribe():
                 or ""
             ).strip()
 
-
             if segment_text:
 
                 full_text.append(
                     segment_text
                 )
 
-
-            words = []
-
+            segment_words = []
 
             if segment.words:
 
@@ -1464,71 +1209,48 @@ def transcribe():
                         or ""
                     ).strip()
 
-
                     if not word_text:
                         continue
 
-
                     word_data = {
 
-                        "word":
-                            word_text,
+                        "word": word_text,
 
-                        "start":
-                            round(
-                                float(
-                                    word.start
-                                ),
-                                3
-                            ),
+                        "start": round(
+                            float(word.start),
+                            3
+                        ),
 
-                        "end":
-                            round(
-                                float(
-                                    word.end
-                                ),
-                                3
-                            )
-
+                        "end": round(
+                            float(word.end),
+                            3
+                        )
                     }
 
-
-                    words.append(
+                    segment_words.append(
                         word_data
                     )
-
 
                     output_words.append(
                         word_data
                     )
 
-
             output_segments.append({
 
-                "start":
-                    round(
-                        float(
-                            segment.start
-                        ),
-                        3
-                    ),
+                "start": round(
+                    float(segment.start),
+                    3
+                ),
 
-                "end":
-                    round(
-                        float(
-                            segment.end
-                        ),
-                        3
-                    ),
+                "end": round(
+                    float(segment.end),
+                    3
+                ),
 
-                "text":
-                    segment_text,
+                "text": segment_text,
 
-                "words":
-                    words
-
+                "words": segment_words
             })
-
 
         detected_language = (
             info.language
@@ -1536,45 +1258,36 @@ def transcribe():
             else "es"
         )
 
-
-        probability = None
-
+        language_probability = None
 
         if info:
 
             try:
 
-                probability = round(
-
+                language_probability = round(
                     float(
                         info.language_probability
                     ),
-
                     4
-
                 )
 
             except Exception:
 
-                probability = None
-
+                pass
 
         print(
-            "[WHISPER] "
-            "Transcripción terminada."
+            "[WHISPER] Transcripción terminada."
         )
-
 
         return jsonify({
 
-            "ok":
-                True,
+            "ok": True,
 
             "language":
                 detected_language,
 
             "language_probability":
-                probability,
+                language_probability,
 
             "text":
                 " ".join(
@@ -1586,13 +1299,10 @@ def transcribe():
 
             "words":
                 output_words
-
         })
-
 
     except Exception as e:
 
-        print()
         print(
             "[WHISPER ERROR]"
         )
@@ -1601,30 +1311,19 @@ def transcribe():
             str(e)
         )
 
+        return jsonify(
 
-        return jsonify({
+            ok=False,
 
-            "ok":
-                False,
+            error=str(e)
 
-            "error":
-                str(e)
-
-        }), 500
-
+        ), 500
 
     finally:
 
-        if temp_video:
+        if input_file:
 
-            temp_video.unlink(
-                missing_ok=True
-            )
-
-
-        if temp_audio:
-
-            temp_audio.unlink(
+            input_file.unlink(
                 missing_ok=True
             )
 
@@ -1638,52 +1337,44 @@ def render():
 
     try:
 
-        data = (
-            request.get_json(
-                silent=True
-            )
-            or {}
-        )
-
+        data = request.get_json(
+            silent=True
+        ) or {}
 
         scenes = data.get(
             "scenes"
         )
-
 
         if not isinstance(
             scenes,
             list
         ):
 
-            return jsonify({
+            return jsonify(
 
-                "ok":
-                    False,
+                ok=False,
 
-                "error":
+                error=(
                     "El campo scenes "
                     "debe ser una lista."
+                )
 
-            }), 400
+            ), 400
 
+        if len(scenes) < 1:
 
-        if len(scenes) == 0:
+            return jsonify(
 
-            return jsonify({
+                ok=False,
 
-                "ok":
-                    False,
+                error=(
+                    "Se necesita "
+                    "al menos una escena."
+                )
 
-                "error":
-                    "Se necesita al menos "
-                    "una escena."
-
-            }), 400
-
+            ), 400
 
         normalized = []
-
 
         for index, scene in enumerate(
             scenes
@@ -1696,42 +1387,28 @@ def render():
 
                 continue
 
-
-            video_url = (
-
-                scene.get(
-                    "video_url"
-                )
-
+            src = (
+                scene.get("video_url")
                 or
-
-                scene.get(
-                    "src"
-                )
-
+                scene.get("src")
+                or
+                scene.get("video_src")
             )
 
+            if not src:
+
+                continue
 
             audio_url = (
-
-                scene.get(
-                    "audio_url"
-                )
-
+                scene.get("audio_url")
                 or
-
-                scene.get(
-                    "audio_src"
-                )
-
+                scene.get("audio_src")
             )
-
 
             duration = scene.get(
                 "duration",
                 7
             )
-
 
             normalized.append({
 
@@ -1739,34 +1416,28 @@ def render():
                     index,
 
                 "video_url":
-                    video_url,
+                    src,
 
                 "audio_url":
                     audio_url,
 
                 "duration":
                     duration
-
             })
-
 
         if not normalized:
 
-            return jsonify({
+            return jsonify(
 
-                "ok":
-                    False,
+                ok=False,
 
-                "error":
-                    "No hay escenas válidas."
+                error="No hay escenas válidas."
 
-            }), 400
-
+            ), 400
 
         job_id = uuid.uuid4().hex
 
-
-        job = {
+        JOBS[job_id] = {
 
             "id":
                 job_id,
@@ -1785,16 +1456,15 @@ def render():
 
             "scene_count":
                 len(normalized)
-
         }
 
+        print(
+            f"[RENDER] Nuevo job: {job_id}"
+        )
 
-        save_job(job)
+        threading.Thread(
 
-
-        thread = threading.Thread(
-
-            target=run_render_job,
+            target=run_job,
 
             args=(
                 job_id,
@@ -1803,106 +1473,66 @@ def render():
 
             daemon=True
 
+        ).start()
+
+        return jsonify(
+            JOBS[job_id]
         )
-
-
-        thread.start()
-
-
-        return jsonify(job)
-
 
     except Exception as e:
 
-        return jsonify({
+        return jsonify(
 
-            "ok":
-                False,
+            ok=False,
 
-            "error":
-                str(e)
+            error=str(e)
 
-        }), 500
+        ), 500
 
 
 # ============================================================
 # STATUS
 # ============================================================
 
-@app.get(
-    "/status/<job_id>"
-)
+@app.get("/status/<job_id>")
 def status(job_id):
 
-    job = load_job(
+    job = JOBS.get(
         job_id
     )
-
 
     if not job:
 
-        return jsonify({
+        return jsonify(
 
-            "ok":
-                False,
+            error=(
+                "No se encontró el render."
+            )
 
-            "error":
-                "No render was found "
-                "with that ID."
+        ), 404
 
-        }), 404
-
-
-    return jsonify(job)
-
-
-# ============================================================
-# ARCHIVOS DE RENDER
-# ============================================================
-
-@app.get(
-    "/files/render/<job_id>/<filename>"
-)
-def render_file(
-    job_id,
-    filename
-):
-
-    render_dir = (
-        BASE /
-        "renders" /
-        job_id
-    )
-
-
-    return send_from_directory(
-
-        render_dir,
-
-        filename,
-
-        as_attachment=False
-
+    return jsonify(
+        job
     )
 
 
 # ============================================================
-# 413
+# ERROR ARCHIVO GRANDE
 # ============================================================
 
 @app.errorhandler(413)
-def too_large(error):
+def request_entity_too_large(error):
 
-    return jsonify({
+    return jsonify(
 
-        "ok":
-            False,
+        ok=False,
 
-        "error":
+        error=(
             "El archivo supera "
-            "el límite máximo de 1 GB."
+            "el límite de 1 GB."
+        )
 
-    }), 413
+    ), 413
 
 
 # ============================================================
@@ -1911,36 +1541,14 @@ def too_large(error):
 
 if __name__ == "__main__":
 
-    print()
-    print(
-        "======================================"
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
     )
-
-    print(
-        "INNOVAX API"
-    )
-
-    print(
-        "======================================"
-    )
-
-    print(
-        f"Whisper: "
-        f"{WHISPER_MODEL_SIZE}"
-    )
-
-    print(
-        f"Port: "
-        f"{PORT}"
-    )
-
-    print()
-
 
     app.run(
-
         host="0.0.0.0",
-
-        port=PORT
-
+        port=port
     )
